@@ -24,6 +24,7 @@ WEBHOOK_URL = "https://roba-cabo-verde.onrender.com/telegram"
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
+# Laikina paskutinių 100 žinučių atmintis
 history = defaultdict(lambda: deque(maxlen=100))
 
 
@@ -78,6 +79,12 @@ async def handle_message(
     chat_id = chat.id
     name = user.first_name or user.username or "Dalyvis"
 
+    print(
+        f"Gauta Telegram zinute: {name}: {text}",
+        flush=True
+    )
+
+    # Išsaugome visas grupės žinutes kontekstui
     history[chat_id].append(f"{name}: {text}")
 
     lower_text = text.lower()
@@ -114,7 +121,10 @@ async def handle_message(
             await update.message.reply_text(answer)
 
     except Exception as e:
-        print(f"OpenAI error: {e}", flush=True)
+        print(
+            f"OpenAI error: {e}",
+            flush=True
+        )
 
         await update.message.reply_text(
             "Roba dabar susidūrė su technine klaida 😅 "
@@ -149,6 +159,11 @@ def run_telegram():
     loop.run_until_complete(application.initialize())
     loop.run_until_complete(application.start())
 
+    print(
+        "Telegram application paleista.",
+        flush=True
+    )
+
     loop.run_forever()
 
 
@@ -161,7 +176,7 @@ telegram_thread.start()
 
 
 # ==========================================
-# RENDER / FLASK
+# FLASK / RENDER
 # ==========================================
 
 web = Flask(__name__)
@@ -179,19 +194,33 @@ def health():
 
 @web.route("/telegram", methods=["POST"])
 def telegram_webhook():
-    data = request.get_json(force=True)
 
-    update = Update.de_json(
-        data,
-        application.bot
-    )
+    try:
+        data = request.get_json(force=True)
 
-    asyncio.run_coroutine_threadsafe(
-        application.update_queue.put(update),
-        loop
-    )
+        update = Update.de_json(
+            data,
+            application.bot
+        )
 
-    return "OK", 200
+        future = asyncio.run_coroutine_threadsafe(
+            application.process_update(update),
+            loop
+        )
+
+        # Palaukiame, kol žinutė bus apdorota
+        future.result(timeout=120)
+
+        return "OK", 200
+
+    except Exception as e:
+
+        print(
+            f"Webhook processing error: {e}",
+            flush=True
+        )
+
+        return "ERROR", 500
 
 
 # ==========================================
@@ -199,6 +228,7 @@ def telegram_webhook():
 # ==========================================
 
 async def setup_webhook():
+
     await application.bot.set_webhook(
         url=WEBHOOK_URL,
         drop_pending_updates=True
@@ -211,6 +241,7 @@ async def setup_webhook():
 
 
 def configure_webhook():
+
     future = asyncio.run_coroutine_threadsafe(
         setup_webhook(),
         loop
@@ -218,6 +249,7 @@ def configure_webhook():
 
     try:
         future.result(timeout=30)
+
     except Exception as e:
         print(
             f"Webhook setup error: {e}",
@@ -231,3 +263,4 @@ webhook_thread = threading.Thread(
 )
 
 webhook_thread.start()
+
