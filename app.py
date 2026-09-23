@@ -1,8 +1,9 @@
 import os
+import asyncio
 import threading
 from collections import defaultdict, deque
 
-from flask import Flask
+from flask import Flask, request
 from openai import OpenAI
 from telegram import Update
 from telegram.ext import (
@@ -19,10 +20,10 @@ from telegram.ext import (
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 
+WEBHOOK_URL = "https://roba-cabo-verde.onrender.com/telegram"
+
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Laikome paskutines 100 kiekvienos grupės žinučių.
-# Kol kas ši atmintis laikina ir po serverio restarto išsivalys.
 history = defaultdict(lambda: deque(maxlen=100))
 
 
@@ -77,13 +78,11 @@ async def handle_message(
     chat_id = chat.id
     name = user.first_name or user.username or "Dalyvis"
 
-    # Išsaugome kiekvieną naują tekstinę žinutę kontekstui.
     history[chat_id].append(f"{name}: {text}")
 
     lower_text = text.lower()
     bot_username = (context.bot.username or "").lower()
 
-    # Roba atsako tik tada, kai į jį kreipiamasi.
     called_roba = (
         "roba" in lower_text
         or (
@@ -124,31 +123,45 @@ async def handle_message(
 
 
 # ==========================================
-# TELEGRAM BOTO PALEIDIMAS
+# TELEGRAM APPLICATION
 # ==========================================
+
+application = (
+    ApplicationBuilder()
+    .token(TELEGRAM_TOKEN)
+    .updater(None)
+    .build()
+)
+
+application.add_handler(
+    MessageHandler(
+        filters.TEXT & ~filters.COMMAND,
+        handle_message
+    )
+)
+
+loop = asyncio.new_event_loop()
+
 
 def run_telegram():
-    application = (
-        ApplicationBuilder()
-        .token(TELEGRAM_TOKEN)
-        .build()
-    )
+    asyncio.set_event_loop(loop)
 
-    application.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            handle_message
-        )
-    )
+    loop.run_until_complete(application.initialize())
+    loop.run_until_complete(application.start())
 
-    application.run_polling(
-        drop_pending_updates=True,
-        stop_signals=None
-    )
+    loop.run_forever()
+
+
+telegram_thread = threading.Thread(
+    target=run_telegram,
+    daemon=True
+)
+
+telegram_thread.start()
 
 
 # ==========================================
-# RENDER WEB SERVERIS
+# RENDER / FLASK
 # ==========================================
 
 web = Flask(__name__)
@@ -164,13 +177,57 @@ def health():
     return "OK"
 
 
+@web.route("/telegram", methods=["POST"])
+def telegram_webhook():
+    data = request.get_json(force=True)
+
+    update = Update.de_json(
+        data,
+        application.bot
+    )
+
+    asyncio.run_coroutine_threadsafe(
+        application.update_queue.put(update),
+        loop
+    )
+
+    return "OK", 200
+
+
 # ==========================================
-# PALEIDŽIAME TELEGRAM BOTĄ
+# WEBHOOK NUSTATYMAS
 # ==========================================
 
-telegram_thread = threading.Thread(
-    target=run_telegram,
+async def setup_webhook():
+    await application.bot.set_webhook(
+        url=WEBHOOK_URL,
+        drop_pending_updates=True
+    )
+
+    print(
+        f"Telegram webhook nustatytas: {WEBHOOK_URL}",
+        flush=True
+    )
+
+
+def configure_webhook():
+    future = asyncio.run_coroutine_threadsafe(
+        setup_webhook(),
+        loop
+    )
+
+    try:
+        future.result(timeout=30)
+    except Exception as e:
+        print(
+            f"Webhook setup error: {e}",
+            flush=True
+        )
+
+
+webhook_thread = threading.Thread(
+    target=configure_webhook,
     daemon=True
 )
 
-telegram_thread.start()
+webhook_thread.start()
