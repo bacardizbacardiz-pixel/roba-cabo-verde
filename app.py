@@ -24,7 +24,8 @@ WEBHOOK_URL = "https://roba-cabo-verde.onrender.com/telegram"
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Laikina paskutinių 100 žinučių atmintis
+# Laikome paskutines 100 kiekvienos grupės žinučių.
+# Kol kas ši atmintis laikina ir po serverio restarto išsivalys.
 history = defaultdict(lambda: deque(maxlen=100))
 
 
@@ -84,12 +85,13 @@ async def handle_message(
         flush=True
     )
 
-    # Išsaugome visas grupės žinutes kontekstui
+    # Išsaugome visas grupės tekstines žinutes kontekstui.
     history[chat_id].append(f"{name}: {text}")
 
     lower_text = text.lower()
     bot_username = (context.bot.username or "").lower()
 
+    # Roba atsako tik tada, kai į jį kreipiamasi.
     called_roba = (
         "roba" in lower_text
         or (
@@ -104,6 +106,11 @@ async def handle_message(
     conversation = "\n".join(history[chat_id])
 
     try:
+        print(
+            "Kreipiamasi i OpenAI...",
+            flush=True
+        )
+
         response = client.responses.create(
             model="gpt-5.6-luna",
             instructions=SYSTEM_PROMPT,
@@ -120,16 +127,27 @@ async def handle_message(
         if answer:
             await update.message.reply_text(answer)
 
+            print(
+                "Roba atsake i Telegram.",
+                flush=True
+            )
+
     except Exception as e:
         print(
             f"OpenAI error: {e}",
             flush=True
         )
 
-        await update.message.reply_text(
-            "Roba dabar susidūrė su technine klaida 😅 "
-            "Pabandyk dar kartą."
-        )
+        try:
+            await update.message.reply_text(
+                "Roba dabar susidūrė su technine klaida 😅 "
+                "Pabandyk dar kartą."
+            )
+        except Exception as telegram_error:
+            print(
+                f"Telegram reply error: {telegram_error}",
+                flush=True
+            )
 
 
 # ==========================================
@@ -156,8 +174,13 @@ loop = asyncio.new_event_loop()
 def run_telegram():
     asyncio.set_event_loop(loop)
 
-    loop.run_until_complete(application.initialize())
-    loop.run_until_complete(application.start())
+    loop.run_until_complete(
+        application.initialize()
+    )
+
+    loop.run_until_complete(
+        application.start()
+    )
 
     print(
         "Telegram application paleista.",
@@ -194,7 +217,6 @@ def health():
 
 @web.route("/telegram", methods=["POST"])
 def telegram_webhook():
-
     try:
         data = request.get_json(force=True)
 
@@ -203,18 +225,17 @@ def telegram_webhook():
             application.bot
         )
 
-        future = asyncio.run_coroutine_threadsafe(
+        # Perduodame Telegram žinutę apdoroti fone.
+        # Nelaukiame OpenAI atsakymo, todėl Telegram
+        # iš karto gauna 200 OK.
+        asyncio.run_coroutine_threadsafe(
             application.process_update(update),
             loop
         )
 
-        # Palaukiame, kol žinutė bus apdorota
-        future.result(timeout=120)
-
         return "OK", 200
 
     except Exception as e:
-
         print(
             f"Webhook processing error: {e}",
             flush=True
@@ -228,7 +249,6 @@ def telegram_webhook():
 # ==========================================
 
 async def setup_webhook():
-
     await application.bot.set_webhook(
         url=WEBHOOK_URL,
         drop_pending_updates=True
@@ -241,7 +261,6 @@ async def setup_webhook():
 
 
 def configure_webhook():
-
     future = asyncio.run_coroutine_threadsafe(
         setup_webhook(),
         loop
@@ -263,4 +282,3 @@ webhook_thread = threading.Thread(
 )
 
 webhook_thread.start()
-
