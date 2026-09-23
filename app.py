@@ -12,34 +12,58 @@ from telegram.ext import (
     filters,
 )
 
+# ==========================================
+# NUSTATYMAI
+# ==========================================
+
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Laikome paskutines grupės žinutes kontekstui.
-# Vėliau galėsime pridėti nuolatinę atmintį.
+# Laikome paskutines 100 kiekvienos grupės žinučių.
+# Kol kas ši atmintis laikina ir po serverio restarto išsivalys.
 history = defaultdict(lambda: deque(maxlen=100))
+
+
+# ==========================================
+# ROBOS CHARAKTERIS
+# ==========================================
 
 SYSTEM_PROMPT = """
 Tu esi Roba – draugiškas AI asistentas privačioje Telegram grupėje
-„Cabo Verde 2026“.
+„Cabo Verde 2026 🦈“.
 
-Kalbėk lietuviškai, nebent žmogus paprašo kitaip.
 Grupė planuoja kelionę į Cabo Verde.
-Atsakyk natūraliai, trumpai ir praktiškai.
+
+Kalbėk lietuviškai, nebent žmogus aiškiai paprašo kitaip.
+Bendrauk natūraliai, draugiškai ir neformaliai.
+Atsakyk praktiškai ir ne per ilgai.
 
 Tau pateikiamas paskutinių grupės pokalbių kontekstas.
-Naudok jį atsakydamas į klausimus, bet neišgalvok faktų,
-kurių pokalbyje nėra.
+Naudok jį, kad suprastum, apie ką grupės nariai kalba.
 
-Tu neturi atsakyti į kiekvieną grupės žinutę.
-Atsakyk tik tada, kai žinutėje aiškiai kreipiamasi į Robą
-arba paminimas tavo Telegram vartotojo vardas.
+Neišgalvok faktų, kurių nežinai.
+
+Tu matai visas naujas grupės tekstines žinutes, tačiau neturi
+atsakyti į kiekvieną jų.
+
+Atsakyk tik tada, kai žmogus aiškiai kreipiasi į Robą,
+pvz. parašo „Roba“, arba pamini tavo Telegram vartotojo vardą.
+
+Kai atsakai, elkis kaip normalus grupės dalyvis, o ne kaip
+formalus klientų aptarnavimo botas.
 """
 
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ==========================================
+# TELEGRAM ŽINUČIŲ APDOROJIMAS
+# ==========================================
+
+async def handle_message(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
     if not update.message or not update.message.text:
         return
 
@@ -47,21 +71,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = update.message.text.strip()
 
-    if not user or user.is_bot:
+    if not chat or not user or user.is_bot:
         return
 
     chat_id = chat.id
     name = user.first_name or user.username or "Dalyvis"
 
-    # Išsaugome visas naujas grupės žinutes kaip kontekstą.
+    # Išsaugome kiekvieną naują tekstinę žinutę kontekstui.
     history[chat_id].append(f"{name}: {text}")
 
+    lower_text = text.lower()
     bot_username = (context.bot.username or "").lower()
-    lower = text.lower()
 
+    # Roba atsako tik tada, kai į jį kreipiamasi.
     called_roba = (
-        "roba" in lower
-        or (bot_username and f"@{bot_username}" in lower)
+        "roba" in lower_text
+        or (
+            bot_username
+            and f"@{bot_username}" in lower_text
+        )
     )
 
     if not called_roba:
@@ -71,12 +99,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         response = client.responses.create(
-            model="gpt-5-mini",
+            model="gpt-5.6-luna",
             instructions=SYSTEM_PROMPT,
             input=(
                 "Paskutinis grupės pokalbio kontekstas:\n\n"
                 f"{conversation}\n\n"
-                f"Naujausia žinutė, į kurią reikia atsakyti:\n{name}: {text}"
+                "Dabar atsakyk į naujausią žinutę:\n"
+                f"{name}: {text}"
             ),
         )
 
@@ -86,23 +115,42 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(answer)
 
     except Exception as e:
-        print(f"OpenAI error: {e}")
+        print(f"OpenAI error: {e}", flush=True)
+
         await update.message.reply_text(
-            "Roba dabar susidūrė su technine klaida 😅 Pabandyk dar kartą."
+            "Roba dabar susidūrė su technine klaida 😅 "
+            "Pabandyk dar kartą."
         )
 
 
-def run_telegram():
-    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+# ==========================================
+# TELEGRAM BOTO PALEIDIMAS
+# ==========================================
 
-    application.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
+def run_telegram():
+    application = (
+        ApplicationBuilder()
+        .token(TELEGRAM_TOKEN)
+        .build()
     )
 
-    application.run_polling(drop_pending_updates=True)
+    application.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            handle_message
+        )
+    )
+
+    application.run_polling(
+        drop_pending_updates=True,
+        stop_signals=None
+    )
 
 
-# Render Web Service turi turėti HTTP serverį.
+# ==========================================
+# RENDER WEB SERVERIS
+# ==========================================
+
 web = Flask(__name__)
 
 
@@ -111,9 +159,18 @@ def home():
     return "Roba Cabo Verde veikia 🦈"
 
 
-if __name__ == "__main__":
-    telegram_thread = threading.Thread(target=run_telegram, daemon=True)
-    telegram_thread.start()
+@web.route("/health")
+def health():
+    return "OK"
 
-    port = int(os.environ.get("PORT", 10000))
-    web.run(host="0.0.0.0", port=port)
+
+# ==========================================
+# PALEIDŽIAME TELEGRAM BOTĄ
+# ==========================================
+
+telegram_thread = threading.Thread(
+    target=run_telegram,
+    daemon=True
+)
+
+telegram_thread.start()
