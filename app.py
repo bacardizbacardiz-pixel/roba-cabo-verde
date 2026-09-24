@@ -22,14 +22,17 @@ web = Flask(__name__)
 # ATMINTIS
 # ============================================================
 
-# Paskutinės pokalbio žinutės.
-# Čia saugomi ir žmonių, ir Robos atsakymai.
+# Paskutinės 100 grupės pokalbio žinučių.
+# Saugomos žmonių žinutės ir Robos atsakymai.
 history = defaultdict(lambda: deque(maxlen=100))
 
 # Paskutinė grupėje įkelta nuotrauka.
 last_photo = {}
 
-# Telegram boto ID ir username gausime automatiškai.
+# Ar paskutinė nuotrauka jau buvo perduota Robai.
+# False = dar neanalizuota.
+photo_used = defaultdict(lambda: True)
+
 BOT_ID = None
 BOT_USERNAME = None
 
@@ -44,77 +47,80 @@ Kalbėk lietuviškai, nebent žmogus aiškiai paprašo kitaip.
 Bendrauk natūraliai, draugiškai ir neformaliai.
 Atsakyk praktiškai ir ne per ilgai.
 
-SVARBU APIE POKALBIO KONTEKSTĄ:
+POKALBIO KONTEKSTAS:
 
 Tau pateikiamas paskutinių grupės pokalbių kontekstas.
-Jame yra ir grupės narių žinutės, ir ankstesni tavo paties
-atsakymai.
+Jame yra grupės narių žinutės ir ankstesni tavo paties atsakymai.
 
-Naudok visą šį kontekstą tęstiniam pokalbiui.
+Naudok ankstesnį pokalbį natūraliai.
 
-Jeigu anksčiau nustatei, kad nuotraukoje yra konkretus
-viešbutis, vieta, daiktas ar kita informacija, o žmogus vėliau
-sako:
-- „tas viešbutis“
-- „o ką apie jį manai?“
-- „o kaip ten paplūdimys?“
-- „papasakok daugiau“
-- „o kiek jis kainuoja?“
-ar panašiai,
+Jeigu prieš tai kalbėjote apie konkretų viešbutį, vietą,
+skrydį, restoraną, nuotrauką ar kitą objektą, suprask tokius
+tęsinius kaip:
 
-suprask, apie ką kalbama, iš ankstesnio pokalbio.
-Neprašyk žmogaus be reikalo dar kartą įkelti tos pačios
-nuotraukos ar kartoti jau pateiktos informacijos.
+„o ką apie jį manai?“
+„o kaip ten paplūdimys?“
+„papasakok daugiau“
+„o kiek kainuoja?“
+„o kaip maistas?“
+„ar verta?“
+„o ten toli?“
 
-Jeigu žmogus Telegram'e daro Reply į tavo ankstesnį atsakymą,
-tai reiškia, kad jis tęsia pokalbį su tavimi.
+Neprašyk žmogaus kartoti informacijos, kuri jau yra pokalbio
+kontekste.
 
 NUOTRAUKOS:
 
-Tu gali analizuoti tau perduotas nuotraukas ir screenshotus.
+Tau gali būti perduota Telegram grupėje įkelta nuotrauka.
 
-Jeigu tau kartu su klausimu perduodama nuotrauka, naudok ją.
-Jeigu ankstesniame savo atsakyme jau aprašei nuotraukos turinį,
-naudok tą informaciją ir vėlesniuose klausimuose.
+Jeigu kartu su klausimu gavai nuotrauką, analizuok ją ir
+naudok jos informaciją atsakymui.
+
+Jeigu nuotraukoje atpažįsti konkretų objektą, viešbutį,
+vietą, dokumentą ar kitą informaciją, aiškiai įvardyk ją
+atsakyme. Tada ši informacija taps tolesnio pokalbio kontekstu.
 
 INTERNETAS:
 
 Tu turi interneto paieškos įrankį.
 
-Kai klausimui reikalinga aktuali ar besikeičianti informacija,
-naudok interneto paiešką pats.
+Kai klausimui reikalinga aktuali arba besikeičianti
+informacija, naudok interneto paiešką pats.
 
-Pavyzdžiai:
-- dabartiniai orai ir prognozės,
+Pavyzdžiui:
+- orai ir prognozės,
 - skrydžių laikai,
 - viešbučių informacija,
-- kainos,
+- viešbučių atsiliepimai,
 - restoranai,
+- kainos,
 - darbo laikas,
 - naujienos,
 - valiutų kursai,
 - kelionių informacija.
 
-Žmogui nereikia pateikti nuorodos.
+Jeigu žmogus klausia, ką manai apie konkretų viešbutį,
+gali pats internete patikrinti jo informaciją, atsiliepimus,
+vietą, paplūdimį, maistą ar kitus aktualius faktus.
 
-Jeigu žmogus klausia apie konkretų viešbutį ir prašo
-papasakoti daugiau, gali pats paieškoti internete aktualios
-informacijos apie tą viešbutį.
+Žmogui nereikia pateikti nuorodos.
 
 Neišgalvok faktų, kurių nežinai.
 
-ELGESYS GRUPĖJE:
+ELGESYS TELEGRAM GRUPĖJE:
 
-Tu matai naujas grupės tekstines žinutes ir nuotraukas,
-bet neturi atsakyti į kiekvieną jų.
+Tu neturi atsakinėti į kiekvieną grupės žinutę.
 
 Atsakyk, kai:
-1. žmogus žinutėje parašo „Roba“;
+1. žmogus parašo „Roba“;
 2. žmogus pamini tavo Telegram username;
-3. žmogus daro Reply į tavo ankstesnę Telegram žinutę.
+3. žmogus Telegram'e daro Reply į tavo ankstesnę žinutę.
 
-Kai atsakai, elkis kaip normalus grupės dalyvis, o ne kaip
-formalus klientų aptarnavimo botas.
+Jeigu žmogus daro Reply į tavo žinutę, suprask tai kaip
+tęstinį pokalbį net jeigu žodis „Roba“ nepaminėtas.
+
+Elkis kaip normalus draugiškas grupės dalyvis,
+o ne kaip formalus klientų aptarnavimo botas.
 """
 
 
@@ -204,12 +210,10 @@ def send_message(
             "message_id": reply_to_message_id
         }
 
-    result = telegram_api(
+    return telegram_api(
         "sendMessage",
         payload
     )
-
-    return result
 
 
 # ============================================================
@@ -276,12 +280,14 @@ def get_telegram_photo_base64(file_id):
 
 
 # ============================================================
-# AR ŽINUTĖ YRA REPLY Į ROBĄ?
+# REPLY Į ROBĄ
 # ============================================================
 
 def is_reply_to_roba(message):
 
-    reply = message.get("reply_to_message")
+    reply = message.get(
+        "reply_to_message"
+    )
 
     if not reply:
         return False
@@ -291,13 +297,17 @@ def is_reply_to_roba(message):
         {}
     )
 
-    reply_user_id = reply_from.get("id")
+    reply_user_id = reply_from.get(
+        "id"
+    )
 
-    if BOT_ID and reply_user_id == BOT_ID:
-
+    if (
+        BOT_ID
+        and reply_user_id == BOT_ID
+    ):
         return True
 
-    username = (
+    reply_username = (
         reply_from
         .get("username", "")
         .lower()
@@ -305,21 +315,18 @@ def is_reply_to_roba(message):
 
     if (
         BOT_USERNAME
-        and username == BOT_USERNAME
+        and reply_username == BOT_USERNAME
     ):
-
         return True
 
     return False
 
 
-# ============================================================
-# REPLY KONTEKSTAS
-# ============================================================
-
 def get_reply_context(message):
 
-    reply = message.get("reply_to_message")
+    reply = message.get(
+        "reply_to_message"
+    )
 
     if not reply:
         return ""
@@ -329,6 +336,9 @@ def get_reply_context(message):
         or reply.get("caption")
         or ""
     )
+
+    if not reply_text:
+        return ""
 
     reply_from = reply.get(
         "from",
@@ -341,64 +351,15 @@ def get_reply_context(message):
         or "Nežinomas"
     )
 
-    if not reply_text:
-        return ""
-
     return (
-        f"\nŽmogus daro Reply į šią žinutę:\n"
+        "\nŽmogus Telegram'e daro Reply "
+        "į šią žinutę:\n"
         f"{reply_name}: {reply_text}\n"
     )
 
 
 # ============================================================
-# AR VERTA PRIDĖTI PASKUTINĘ NUOTRAUKĄ?
-# ============================================================
-
-def should_include_last_photo(
-    text,
-    replied_to_roba
-):
-
-    lower = text.lower()
-
-    photo_words = [
-        "nuotrauk",
-        "paveiks",
-        "foto",
-        "screenshot",
-        "ekrano",
-        "aukščiau",
-        "auksciau",
-        "čia",
-        "cia",
-        "šit",
-        "sit",
-        "tas viešbut",
-        "ta viesbut",
-        "tą viešbut",
-        "ta viesbut",
-        "apie jį",
-        "apie ji",
-        "ką matai",
-        "ka matai"
-    ]
-
-    if any(
-        word in lower
-        for word in photo_words
-    ):
-        return True
-
-    # Reply į Robos atsakymą gali būti
-    # tęsinys apie prieš tai analizuotą nuotrauką.
-    if replied_to_roba:
-        return True
-
-    return False
-
-
-# ============================================================
-# ŽINUTĖS APDOROJIMAS
+# PAGRINDINIS ŽINUTĖS APDOROJIMAS
 # ============================================================
 
 def process_message(
@@ -434,13 +395,17 @@ def process_message(
                 "caption": text
             }
 
+            # Šios nuotraukos Roba dar nematė.
+            photo_used[chat_id] = False
+
             print(
-                "Paskutine nuotrauka isiminta.",
+                "Nauja nuotrauka isiminta. "
+                "Ji dar neanalizuota.",
                 flush=True
             )
 
         # ----------------------------------------------------
-        # ŽMOGAUS ŽINUTĘ DEDAM Į ISTORIJĄ
+        # ŽMOGAUS ŽINUTĖ → ISTORIJA
         # ----------------------------------------------------
 
         history_text = text
@@ -466,7 +431,7 @@ def process_message(
             )
 
         # ----------------------------------------------------
-        # AR ROBĄ PAKVIETĖ?
+        # AR ROBĄ KVIEČIA?
         # ----------------------------------------------------
 
         lower_text = text.lower()
@@ -501,7 +466,7 @@ def process_message(
             return
 
         # ----------------------------------------------------
-        # VISA POKALBIO ISTORIJA
+        # POKALBIO KONTEKSTAS
         # ----------------------------------------------------
 
         conversation = "\n".join(
@@ -525,10 +490,6 @@ def process_message(
                 flush=True
             )
 
-        # ----------------------------------------------------
-        # PROMPT
-        # ----------------------------------------------------
-
         prompt_text = (
             "Paskutinis grupės pokalbio "
             "kontekstas:\n\n"
@@ -547,37 +508,39 @@ def process_message(
         ]
 
         # ----------------------------------------------------
-        # KURIĄ NUOTRAUKĄ DUOTI OPENAI?
+        # NUOTRAUKOS LOGIKA
         # ----------------------------------------------------
 
         image_file_id = None
 
-        # Jeigu nuotrauka pridėta prie dabartinės žinutės.
+        # Jeigu Roba kviečiamas žinute,
+        # prie kurios tiesiogiai pridėta nuotrauka.
         if photo_file_id:
 
             image_file_id = photo_file_id
 
-        # Arba tęsiamas pokalbis apie paskutinę nuotrauką.
-        elif should_include_last_photo(
-            text,
-            replied_to_roba
+        # SVARBIAUSIAS PAKEITIMAS:
+        #
+        # Jeigu prieš tai grupėje buvo įkelta nuotrauka
+        # ir Roba jos dar neanalizavo, pirmas kitas
+        # kreipinys į Robą automatiškai gauna nuotrauką.
+        #
+        # Jokių raktažodžių.
+        elif (
+            chat_id in last_photo
+            and not photo_used[chat_id]
         ):
 
-            saved_photo = last_photo.get(
-                chat_id
+            image_file_id = (
+                last_photo[chat_id]["file_id"]
             )
 
-            if saved_photo:
-
-                image_file_id = (
-                    saved_photo["file_id"]
-                )
-
-                print(
-                    "Pridedama ankstesne "
-                    "grupes nuotrauka.",
-                    flush=True
-                )
+            print(
+                "Prie pirmo kreipinio "
+                "pridedama paskutine "
+                "neanalizuota nuotrauka.",
+                flush=True
+            )
 
         # ----------------------------------------------------
         # NUOTRAUKA → OPENAI
@@ -612,7 +575,7 @@ def process_message(
             )
 
         # ----------------------------------------------------
-        # OPENAI + INTERNETAS
+        # OPENAI
         # ----------------------------------------------------
 
         print(
@@ -659,7 +622,7 @@ def process_message(
             return
 
         # ----------------------------------------------------
-        # SIUNČIAM ATSAKYMĄ
+        # TELEGRAM ATSAKYMAS
         # ----------------------------------------------------
 
         send_result = send_message(
@@ -669,13 +632,24 @@ def process_message(
         )
 
         # ----------------------------------------------------
-        # LABAI SVARBU:
-        # ROBOS ATSAKYMĄ IRGI DEDAM Į ISTORIJĄ
+        # ROBOS ATSAKYMAS → ISTORIJA
         # ----------------------------------------------------
 
         history[chat_id].append(
             f"Roba: {answer}"
         )
+
+        # Jeigu prie šio atsakymo siuntėme nuotrauką,
+        # laikome, kad Roba ją jau išanalizavo.
+        if image_file_id:
+
+            photo_used[chat_id] = True
+
+            print(
+                "Nuotrauka pazymeta "
+                "kaip analizuota.",
+                flush=True
+            )
 
         sent_message_id = (
             send_result
@@ -745,7 +719,6 @@ def telegram_webhook():
 
     try:
 
-        # Boto ID reikalingas Reply atpažinimui.
         get_bot_identity()
 
         data = request.get_json(
@@ -774,7 +747,6 @@ def telegram_webhook():
             {}
         )
 
-        # Ignoruojam paties boto webhook žinutes.
         if user.get("is_bot"):
 
             return "OK", 200
@@ -823,13 +795,16 @@ def telegram_webhook():
 
         if photos:
 
+            # Telegram pateikia kelias tos pačios
+            # nuotraukos rezoliucijas.
+            # Imam didžiausią.
             photo_file_id = (
                 photos[-1]
                 .get("file_id")
             )
 
         # ----------------------------------------------------
-        # REPLY Į ROBĄ?
+        # REPLY
         # ----------------------------------------------------
 
         replied_to_roba = (
@@ -845,7 +820,7 @@ def telegram_webhook():
         )
 
         # ----------------------------------------------------
-        # JEIGU NĖRA NIEKO NAUDINGO
+        # NIEKO NAUDINGO
         # ----------------------------------------------------
 
         if (
@@ -856,7 +831,7 @@ def telegram_webhook():
             return "OK", 200
 
         # ----------------------------------------------------
-        # BACKGROUND THREAD
+        # BACKGROUND
         # ----------------------------------------------------
 
         thread = threading.Thread(
