@@ -69,6 +69,12 @@ Telegram atsakymuose gali naudoti paprastą Markdown:
 - ~~tekstas~~ perbraukimui.
 Nenaudok sudėtingo Markdown, lentelių ar Markdown antraščių.
 
+SVARBU APIE PRIMINIMUS:
+Niekada paprastame pokalbio atsakyme neteigk „priminsiu“, „nustačiau priminimą“
+ar panašiai. Tik specialus priminimų modulis gali patvirtinti, kad priminimas
+realiai išsaugotas. Jei žmogus kalba apie priminimą, bet specialus modulis jo
+nesukūrė, nepateik melagingo patvirtinimo.
+
 Tu esi grupės dalyvis, o ne formalus klientų aptarnavimo botas.
 
 
@@ -2095,6 +2101,57 @@ def save_reminder(
     return result.data or []
 
 
+def get_reminder_followup_text(text, replied_to_roba, reply_context):
+    """
+    Jei žmogus atsako į Robos klausimą apie priminimo laiką, sujungiame
+    ankstesnį priminimo kontekstą su nauju laiko atsakymu.
+    Pvz. Roba: "Kada priminti?" -> žmogus: "po 1 minutės".
+    """
+    if not replied_to_roba:
+        return None
+
+    current = (text or "").strip()
+    context = (reply_context or "").strip()
+
+    if not current or not context:
+        return None
+
+    context_lower = context.lower()
+
+    reminder_context_words = (
+        "kada", "priminti", "primin", "laik", "dat"
+    )
+
+    if not (
+        ("prim" in context_lower)
+        and any(word in context_lower for word in reminder_context_words)
+    ):
+        return None
+
+    # Naujas atsakymas turi atrodyti kaip laikas / data / santykinis laikas.
+    current_lower = current.lower()
+    time_like = bool(
+        re.search(r"\b\d{1,2}(?::\d{2})?\b", current_lower)
+        or any(word in current_lower for word in (
+            "po ", "minut", "valand", "rytoj", "poryt",
+            "šiandien", "siandien", "vakare", "ryte",
+            "dien", "savait"
+        ))
+    )
+
+    if not time_like:
+        return None
+
+    return (
+        "Tai yra tęsinys ankstesnio priminimo dialogo.\n"
+        "ROBOS ANKSTESNĖ ŽINUTĖ:\n"
+        f"{context}\n\n"
+        "ŽMOGAUS ATSAKYMAS APIE LAIKĄ:\n"
+        f"{current}\n\n"
+        "Sukurk realų priminimą pagal šį tęstinį dialogą."
+    )
+
+
 def handle_reminder_request(
     chat_id,
     sender_name,
@@ -2933,21 +2990,34 @@ def process_message(
             return
 
         # ----------------------------------------------------
-        # PRIMINIMO SUKŪRIMAS
+        # PRIMINIMO SUKŪRIMAS / TĘSTINIS DIALOGAS
         # ----------------------------------------------------
 
-        if text and is_reminder_request(text):
+        reminder_followup_text = get_reminder_followup_text(
+            text=text,
+            replied_to_roba=replied_to_roba,
+            reply_context=reply_context
+        )
 
-            reminder_answer = handle_reminder_management(
-                chat_id=chat_id,
-                text=text
-            )
+        if text and (
+            is_reminder_request(text)
+            or reminder_followup_text
+        ):
+
+            reminder_answer = None
+
+            # Valdymą (parodyk / atšauk) tikriname tik tiesioginei komandai.
+            if is_reminder_request(text):
+                reminder_answer = handle_reminder_management(
+                    chat_id=chat_id,
+                    text=text
+                )
 
             if reminder_answer is None:
                 reminder_answer = handle_reminder_request(
                     chat_id=chat_id,
                     sender_name=name,
-                    text=text,
+                    text=reminder_followup_text or text,
                     message_id=message_id
                 )
 
