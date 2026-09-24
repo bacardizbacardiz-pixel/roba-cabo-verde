@@ -1241,6 +1241,227 @@ def handle_todo(chat_id, sender_name, text):
 # PRIMINIMAI
 # ============================================================
 
+
+REMINDER_MANAGEMENT_PROMPT = """
+Tu esi Robos Telegram priminimų tvarkytojas.
+
+Nustatyk, ar žmogus:
+- nori pamatyti aktyvius priminimus -> "list"
+- nori atšaukti / ištrinti priminimą -> "cancel"
+- nieko iš šių veiksmų -> "none"
+
+Jeigu veiksmas "cancel", iš žmogaus žinutės ištrauk trumpą paieškos frazę,
+pagal kurią galima surasti priminimą, pvz.:
+"Roba, atšauk priminimą apie check-in" -> "check-in"
+
+Grąžink TIK validų JSON.
+
+Pavyzdžiai:
+{"action":"list","query":""}
+{"action":"cancel","query":"check-in"}
+{"action":"none","query":""}
+"""
+
+
+def get_pending_reminders(chat_id):
+
+    result = (
+        supabase
+        .table("roba_reminders")
+        .select(
+            "id,reminder_text,remind_at,status,created_by"
+        )
+        .eq("chat_id", chat_id)
+        .eq("status", "pending")
+        .order("remind_at", desc=False)
+        .execute()
+    )
+
+    return result.data or []
+
+
+def format_reminder_list(rows):
+
+    if not rows:
+        return "Aktyvių priminimų nėra ⏰"
+
+    lines = ["Mūsų aktyvūs priminimai ⏰"]
+
+    for i, row in enumerate(rows, start=1):
+
+        raw_time = row.get("remind_at")
+        text = row.get("reminder_text") or "Priminimas"
+
+        try:
+            dt = datetime.fromisoformat(
+                raw_time.replace("Z", "+00:00")
+            )
+            local_dt = dt.astimezone(
+                ZoneInfo("Europe/Vilnius")
+            )
+            pretty = local_dt.strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            pretty = raw_time or "laikas nežinomas"
+
+        lines.append(
+            f"{i}. ⏰ {pretty} — {text}"
+        )
+
+    return "\n".join(lines)
+
+
+def normalize_reminder_match_text(text):
+
+    text = (text or "").lower().strip()
+
+    replacements = {
+        "ą": "a",
+        "č": "c",
+        "ę": "e",
+        "ė": "e",
+        "į": "i",
+        "š": "s",
+        "ų": "u",
+        "ū": "u",
+        "ž": "z"
+    }
+
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return " ".join(text.split())
+
+
+def find_best_reminder_match(rows, query):
+
+    if not rows:
+        return None
+
+    q = normalize_reminder_match_text(query)
+
+    if not q:
+        return None
+
+    q_words = [
+        word for word in q.split()
+        if len(word) >= 3
+    ]
+
+    best = None
+    best_score = 0
+
+    for row in rows:
+
+        task = normalize_reminder_match_text(
+            row.get("reminder_text") or ""
+        )
+
+        score = 0
+
+        if q in task or task in q:
+            score += 100
+
+        for word in q_words:
+            if word in task:
+                score += 10
+
+        if score > best_score:
+            best_score = score
+            best = row
+
+    if best_score <= 0:
+        return None
+
+    return best
+
+
+def detect_reminder_management(text):
+
+    try:
+        response = client.responses.create(
+            model="gpt-5.6-luna",
+            instructions=REMINDER_MANAGEMENT_PROMPT,
+            input=text
+        )
+
+        raw = response.output_text.strip()
+
+        if raw.startswith("```"):
+            raw = raw.replace("```json", "", 1)
+            raw = raw.replace("```", "").strip()
+
+        data = json.loads(raw)
+
+        return {
+            "action": data.get("action", "none"),
+            "query": data.get("query", "")
+        }
+
+    except Exception as e:
+
+        print(
+            f"Priminimu valdymo atpazinimo klaida: "
+            f"{type(e).__name__}: {e}",
+            flush=True
+        )
+
+        return {
+            "action": "none",
+            "query": ""
+        }
+
+
+def handle_reminder_management(chat_id, text):
+
+    decision = detect_reminder_management(text)
+    action = decision.get("action")
+
+    if action == "list":
+
+        rows = get_pending_reminders(chat_id)
+        return format_reminder_list(rows)
+
+    if action == "cancel":
+
+        rows = get_pending_reminders(chat_id)
+
+        if not rows:
+            return "Aktyvių priminimų nėra ⏰"
+
+        match = find_best_reminder_match(
+            rows,
+            decision.get("query", "")
+        )
+
+        if not match:
+            return (
+                "Neradau tokio aktyvaus priminimo 🙂\n"
+                "Parašyk „Roba, parodyk priminimus“ "
+                "ir pamatysim sąrašą."
+            )
+
+        reminder_id = match.get("id")
+        reminder_text = match.get("reminder_text") or "Priminimas"
+
+        (
+            supabase
+            .table("roba_reminders")
+            .update({
+                "status": "cancelled"
+            })
+            .eq("id", reminder_id)
+            .eq("status", "pending")
+            .execute()
+        )
+
+        return (
+            "Priminimą atšaukiau ✅\n"
+            f"📌 {reminder_text}"
+        )
+
+    return None
+
 REMINDER_PROMPT = """
 Tu esi Robos kelionės priminimų tvarkytojas.
 
@@ -1294,7 +1515,10 @@ def is_reminder_request(text):
         "primink",
         "priminimą",
         "priminima",
-        "priminimas"
+        "priminimas",
+        "priminimai",
+        "priminimus",
+        "priminimu"
     ]
 
     return any(word in lower for word in words)
@@ -2058,12 +2282,18 @@ def process_message(
 
         if text and is_reminder_request(text):
 
-            reminder_answer = handle_reminder_request(
+            reminder_answer = handle_reminder_management(
                 chat_id=chat_id,
-                sender_name=name,
-                text=text,
-                message_id=message_id
+                text=text
             )
+
+            if reminder_answer is None:
+                reminder_answer = handle_reminder_request(
+                    chat_id=chat_id,
+                    sender_name=name,
+                    text=text,
+                    message_id=message_id
+                )
 
             send_result = send_message(
                 chat_id,
