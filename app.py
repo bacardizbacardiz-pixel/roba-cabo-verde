@@ -5,7 +5,7 @@ import re
 import threading
 import urllib.request
 from collections import defaultdict, deque
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from flask import Flask, request, jsonify
@@ -2456,6 +2456,105 @@ def process_message(
             )
 
 
+
+# ============================================================
+# PRIMINIMŲ IŠSIUNTIMAS
+# ============================================================
+
+def send_due_reminders():
+
+    now_utc = datetime.now(ZoneInfo("UTC"))
+    cutoff = (now_utc + timedelta(minutes=2)).isoformat()
+
+    result = (
+        supabase
+        .table("roba_reminders")
+        .select(
+            "id,chat_id,reminder_text,remind_at,status"
+        )
+        .eq("status", "pending")
+        .lte("remind_at", cutoff)
+        .order("remind_at", desc=False)
+        .limit(50)
+        .execute()
+    )
+
+    rows = result.data or []
+    sent = 0
+    failed = 0
+
+    for row in rows:
+
+        reminder_id = row.get("id")
+        chat_id = row.get("chat_id")
+        reminder_text = row.get("reminder_text") or "Priminimas"
+
+        try:
+            message = (
+                "⏰ Robos priminimas\n\n"
+                f"📌 {reminder_text}"
+            )
+
+            send_result = send_message(
+                chat_id,
+                message
+            )
+
+            sent_message_id = (
+                send_result
+                .get("result", {})
+                .get("message_id")
+            )
+
+            (
+                supabase
+                .table("roba_reminders")
+                .update({
+                    "status": "sent",
+                    "sent_at": now_utc.isoformat()
+                })
+                .eq("id", reminder_id)
+                .eq("status", "pending")
+                .execute()
+            )
+
+            save_message_to_db(
+                chat_id=chat_id,
+                telegram_message_id=sent_message_id,
+                sender_name="Roba",
+                sender_id=BOT_ID,
+                message_text=message,
+                has_photo=False,
+                photo_file_id=None
+            )
+
+            history[chat_id].append(
+                f"Roba: {message}"
+            )
+
+            sent += 1
+
+            print(
+                f"Priminimas issiustas: ID={reminder_id}",
+                flush=True
+            )
+
+        except Exception as e:
+
+            failed += 1
+
+            print(
+                f"Priminimo ID={reminder_id} "
+                f"siuntimo klaida: {type(e).__name__}: {e}",
+                flush=True
+            )
+
+    return {
+        "checked": len(rows),
+        "sent": sent,
+        "failed": failed
+    }
+
 # ============================================================
 # WEB
 # ============================================================
@@ -2470,6 +2569,32 @@ def home():
 def health():
 
     return "OK"
+
+
+@web.route("/check-reminders")
+def check_reminders():
+
+    try:
+        get_bot_identity()
+        result = send_due_reminders()
+
+        return jsonify({
+            "status": "OK",
+            **result
+        })
+
+    except Exception as e:
+
+        print(
+            f"Priminimu patikrinimo klaida: "
+            f"{type(e).__name__}: {e}",
+            flush=True
+        )
+
+        return jsonify({
+            "status": "ERROR",
+            "error": str(e)
+        }), 500
 
 
 # ============================================================
