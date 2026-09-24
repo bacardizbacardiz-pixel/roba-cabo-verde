@@ -1107,7 +1107,7 @@ def format_todo_list(items):
 
 def is_possible_todo_request(text, current_items=None):
 
-    normalized = normalize_todo_text(text or "")
+    normalized = normalize_todo_word(text or "")
 
     direct_words = [
         "todo",
@@ -1148,7 +1148,7 @@ def is_possible_todo_request(text, current_items=None):
     if current_items and any(word in normalized for word in action_words):
 
         for item in current_items:
-            task = normalize_todo_text(item.get("task") or "")
+            task = normalize_todo_word(item.get("task") or "")
             task_words = [
                 w for w in task.split()
                 if len(w) >= 4
