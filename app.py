@@ -3578,11 +3578,35 @@ def send_due_reminders():
 
 
 # ============================================================
-# PROAKTYVUS ROBA
+# PROAKTYVUS + SOCIALUS ROBA
 # ============================================================
 
 PROACTIVE_CHECK_HOUR = 9
+SOCIAL_CHECK_HOUR = 18
+SOCIAL_WEEKDAYS = set(range(7))  # kasdien
 PROACTIVE_TRIP_DATE = date(2026, 11, 30)
+
+SOCIAL_PROMPT = """
+Tu esi Roba 🦈 – draugiškas penktas Cabo Verde kelionės kompanijos narys
+privačioje draugų Telegram grupėje.
+
+Tau pateikiama kelionės atmintis, TODO ir paskutinis grupės pokalbis.
+Nuspręsk, ar verta DABAR pačiam pradėti trumpą socialų pokalbį.
+
+Taisyklės:
+- nerašyk formalios suvestinės;
+- būk natūralus, trumpas, su lengvu humoru;
+- geriausia – vienas konkretus klausimas kompanijai;
+- remkis tikru grupės kontekstu;
+- nekartok ką tik aptartos temos;
+- jei grupė aktyviai kalbasi, prisitaikyk prie temos ir parašyk trumpai;
+- gali pasiūlyti restoraną, ekskursiją, transferį, planą ar kitą kelionės temą;
+- kasdien sugalvok bent vieną trumpą, natūralią ir su kelione susijusią žinutę ar klausimą;
+- niekada nekurk neegzistuojančių faktų;
+- grąžink TIK validų JSON.
+
+{"send":true,"message":"🦈 ..."}
+"""
 
 def get_proactive_chat_ids():
     ids = set()
@@ -3630,10 +3654,9 @@ def _parse_iso_datetime(value):
 def get_open_todo_for_proactive(chat_id):
     try:
         result = (
-            supabase.table("roba_todo")
-            .select("task").eq("chat_id", chat_id)
-            .eq("status", "open").order("created_at", desc=False)
-            .limit(10).execute()
+            supabase.table("roba_todo").select("task")
+            .eq("chat_id", chat_id).eq("status", "open")
+            .order("created_at", desc=False).limit(10).execute()
         )
         return [r.get("task") for r in (result.data or []) if r.get("task")]
     except Exception:
@@ -3642,10 +3665,9 @@ def get_open_todo_for_proactive(chat_id):
 def get_pending_reminders_for_proactive(chat_id):
     try:
         result = (
-            supabase.table("roba_reminders")
-            .select("reminder_text,remind_at").eq("chat_id", chat_id)
-            .eq("status", "pending").order("remind_at", desc=False)
-            .limit(5).execute()
+            supabase.table("roba_reminders").select("reminder_text,remind_at")
+            .eq("chat_id", chat_id).eq("status", "pending")
+            .order("remind_at", desc=False).limit(5).execute()
         )
         return result.data or []
     except Exception:
@@ -3656,29 +3678,23 @@ def build_proactive_message(chat_id, now_local):
     todo = get_open_todo_for_proactive(chat_id)
     reminders = get_pending_reminders_for_proactive(chat_id)
 
-    # Iki kelionės likus 60, 30, 14, 7, 3, 1 dienai – naudinga suvestinė.
     milestones = {60, 30, 14, 7, 3, 1}
     if days in milestones:
         lines = [f"🦈 Iki Cabo Verde kelionės liko **{days} d.**"]
         if todo:
-            lines.append("")
-            lines.append(f"📋 TODO dar liko: **{len(todo)}**")
-            for task in todo[:5]:
-                lines.append(f"• {task}")
+            lines += ["", f"📋 TODO dar liko: **{len(todo)}**"]
+            lines += [f"• {task}" for task in todo[:5]]
         if reminders:
-            lines.append("")
-            lines.append("⏰ Artimiausi suplanuoti priminimai:")
+            lines += ["", "⏰ Artimiausi suplanuoti priminimai:"]
             for row in reminders[:3]:
                 when = _parse_iso_datetime(row.get("remind_at"))
-                if when:
-                    when = when.astimezone(ZoneInfo("Europe/Vilnius"))
-                    when_text = when.strftime("%Y-%m-%d %H:%M")
-                else:
-                    when_text = "laikas nenurodytas"
+                when_text = (
+                    when.astimezone(ZoneInfo("Europe/Vilnius")).strftime("%Y-%m-%d %H:%M")
+                    if when else "laikas nenurodytas"
+                )
                 lines.append(f"• {when_text} — {row.get('reminder_text')}")
         return "\n".join(lines), "trip_countdown"
 
-    # Kelionės rytas.
     if days == 0:
         return (
             "🦈✈️ **Šiandien išskrendam į Cabo Verde!**\n\n"
@@ -3686,66 +3702,104 @@ def build_proactive_message(chat_id, now_local):
             "Geros kelionės! 🌴",
             "departure_day"
         )
-
     return None, None
+
+def build_social_message(chat_id, now_local):
+    days = (PROACTIVE_TRIP_DATE - now_local.date()).days
+    memory = get_long_term_memory(chat_id)
+    recent = get_recent_messages_from_db(chat_id, limit=25)
+    todo = get_open_todo_for_proactive(chat_id)
+
+    prompt = (
+        f"IKI KELIONĖS LIKO DIENŲ: {days}\n\n"
+        f"ILGALAIKĖ ATMINTIS:\n{memory or '(tuščia)'}\n\n"
+        "NEATLIKTI TODO:\n"
+        f"{chr(10).join('- ' + x for x in todo) if todo else '(nėra)'}\n\n"
+        "PASKUTINIS GRUPĖS POKALBIS:\n"
+        f"{chr(10).join(recent) if recent else '(nėra)'}"
+    )
+
+    response = client.responses.create(
+        model="gpt-5.6-luna",
+        instructions=SOCIAL_PROMPT,
+        input=prompt
+    )
+    raw = response.output_text.strip()
+    if raw.startswith("```"):
+        raw = raw.replace("```json", "", 1).replace("```", "").strip()
+    decision = json.loads(raw)
+    if not decision.get("send"):
+        return None
+    return (decision.get("message") or "").strip() or None
 
 def check_proactive():
     now_local = datetime.now(ZoneInfo("Europe/Vilnius"))
     now_utc = datetime.now(ZoneInfo("UTC"))
-
-    # Tik ryto lange. Cron gali kviesti kas minutę, bet tikriname kartą per dieną.
-    if now_local.hour != PROACTIVE_CHECK_HOUR:
-        return {"proactive_checked": 0, "proactive_sent": 0}
-
     checked = 0
     sent = 0
 
-    for chat_id in get_proactive_chat_ids():
-        try:
-            state = get_proactive_state(chat_id)
-            last_check = _parse_iso_datetime((state or {}).get("last_check_at"))
-            if last_check and last_check.astimezone(ZoneInfo("Europe/Vilnius")).date() == now_local.date():
-                continue
+    # Kelionės suvestinės – 09:00.
+    if now_local.hour == PROACTIVE_CHECK_HOUR:
+        for chat_id in get_proactive_chat_ids():
+            try:
+                state = get_proactive_state(chat_id)
+                last_check = _parse_iso_datetime((state or {}).get("last_check_at"))
+                if last_check and last_check.astimezone(ZoneInfo("Europe/Vilnius")).date() == now_local.date():
+                    continue
+                checked += 1
+                save_proactive_state(chat_id, last_check_at=now_utc.isoformat())
+                message, message_type = build_proactive_message(chat_id, now_local)
+                if not message:
+                    continue
+                send_result = send_message(chat_id, message)
+                sent_message_id = send_result.get("result", {}).get("message_id")
+                save_message_to_db(chat_id, sent_message_id, "Roba", BOT_ID, message, False, None)
+                history[chat_id].append(f"Roba: {message}")
+                save_proactive_state(chat_id, last_message_at=now_utc.isoformat(), last_message_type=message_type)
+                sent += 1
+            except Exception as e:
+                print(f"Proaktyvaus Robos klaida chat={chat_id}: {type(e).__name__}: {e}", flush=True)
 
-            checked += 1
-            save_proactive_state(chat_id, last_check_at=now_utc.isoformat())
+    # Socialinis pokalbis – kasdien 18:00.
+    if now_local.hour == SOCIAL_CHECK_HOUR and now_local.weekday() in SOCIAL_WEEKDAYS:
+        for chat_id in get_proactive_chat_ids():
+            try:
+                state = get_proactive_state(chat_id)
+                last_message = _parse_iso_datetime((state or {}).get("last_message_at"))
 
-            message, message_type = build_proactive_message(chat_id, now_local)
-            if not message:
-                continue
+                if (
+                    last_message
+                    and last_message.astimezone(ZoneInfo("Europe/Vilnius")).date() == now_local.date()
+                    and (state or {}).get("last_message_type") in ("social", "social_silent")
+                ):
+                    continue
 
-            # Papildoma apsauga nuo to paties tipo pakartotinio pranešimo tą pačią dieną.
-            last_message = _parse_iso_datetime((state or {}).get("last_message_at"))
-            if (
-                last_message
-                and last_message.astimezone(ZoneInfo("Europe/Vilnius")).date() == now_local.date()
-                and (state or {}).get("last_message_type") == message_type
-            ):
-                continue
+                checked += 1
+                message = build_social_message(chat_id, now_local)
+                if not message:
+                    print(f"Socialus Roba nusprende patyleti: chat={chat_id}", flush=True)
+                    # Kad cron nekviestų AI dar 59 kartus tą pačią valandą,
+                    # pažymime socialinį patikrinimą kaip atliktą.
+                    save_proactive_state(
+                        chat_id,
+                        last_message_at=now_utc.isoformat(),
+                        last_message_type="social_silent"
+                    )
+                    continue
 
-            send_result = send_message(chat_id, message)
-            sent_message_id = send_result.get("result", {}).get("message_id")
-
-            save_message_to_db(
-                chat_id=chat_id,
-                telegram_message_id=sent_message_id,
-                sender_name="Roba",
-                sender_id=BOT_ID,
-                message_text=message,
-                has_photo=False,
-                photo_file_id=None
-            )
-            history[chat_id].append(f"Roba: {message}")
-            save_proactive_state(
-                chat_id,
-                last_message_at=now_utc.isoformat(),
-                last_message_type=message_type
-            )
-            sent += 1
-            print(f"Proaktyvus Roba issiunte: chat={chat_id}, type={message_type}", flush=True)
-
-        except Exception as e:
-            print(f"Proaktyvaus Robos klaida chat={chat_id}: {type(e).__name__}: {e}", flush=True)
+                send_result = send_message(chat_id, message)
+                sent_message_id = send_result.get("result", {}).get("message_id")
+                save_message_to_db(chat_id, sent_message_id, "Roba", BOT_ID, message, False, None)
+                history[chat_id].append(f"Roba: {message}")
+                save_proactive_state(
+                    chat_id,
+                    last_message_at=now_utc.isoformat(),
+                    last_message_type="social"
+                )
+                sent += 1
+                print(f"Socialus Roba pats pradejo pokalbi: chat={chat_id}", flush=True)
+            except Exception as e:
+                print(f"Socialaus Robos klaida chat={chat_id}: {type(e).__name__}: {e}", flush=True)
 
     return {"proactive_checked": checked, "proactive_sent": sent}
 
