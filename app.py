@@ -63,6 +63,12 @@ Kalbėk lietuviškai, nebent žmogus aiškiai paprašo kitaip.
 Bendrauk natūraliai, draugiškai ir neformaliai.
 Atsakyk praktiškai ir ne per ilgai.
 
+Telegram atsakymuose gali naudoti paprastą Markdown:
+- **tekstas** paryškinimui;
+- *tekstas* kursyvui;
+- ~~tekstas~~ perbraukimui.
+Nenaudok sudėtingo Markdown, lentelių ar Markdown antraščių.
+
 Tu esi grupės dalyvis, o ne formalus klientų aptarnavimo botas.
 
 
@@ -2013,7 +2019,8 @@ def send_message(
 
     payload = {
         "chat_id": chat_id,
-        "text": text
+        "text": text,
+        "parse_mode": "Markdown"
     }
 
     if reply_to_message_id:
