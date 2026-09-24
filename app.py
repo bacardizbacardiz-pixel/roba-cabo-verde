@@ -1286,6 +1286,81 @@ def detect_todo_action(text, current_items):
     return json.loads(raw)
 
 
+def is_todo_delete_request(text, current_items):
+    lower = normalize_todo_word(text or "")
+    delete_words = (
+        "pamirsk", "uzmirsk", "istrink", "pasalink",
+        "isimk", "isbrauk"
+    )
+    if not any(word in lower for word in delete_words):
+        return False
+
+    # Explicit memory wording must remain a long-term-memory request.
+    if "atmint" in lower:
+        return False
+
+    # Numbered TODO reference, e.g. "pamiršk 1 punktą".
+    if re.search(r"\b\d+\s*(?:punk|nr|numer)", lower):
+        return bool(current_items)
+
+    # Or the request contains/matches an actual open TODO item.
+    cleaned = lower
+    for word in ("roba",) + delete_words:
+        cleaned = cleaned.replace(word, " ")
+    cleaned = re.sub(r"\b(?:todo|punkta|punkta|punktas|punktą|sarasas|saraso)\b", " ", cleaned)
+    cleaned = " ".join(cleaned.split())
+
+    if cleaned and find_best_todo_match(current_items, cleaned):
+        return True
+
+    return False
+
+
+def handle_todo_delete_direct(chat_id, text, current_items):
+    lower = normalize_todo_word(text or "")
+
+    # Number refers to the current open TODO list order.
+    m = re.search(r"\b(\d+)\s*(?:punk|nr|numer)", lower)
+    if m:
+        index = int(m.group(1)) - 1
+        if index < 0 or index >= len(current_items):
+            return (
+                f"TODO sąraše dabar yra {len(current_items)} punktai. "
+                "Parašyk „Roba, parodyk TODO“ 🙂"
+            )
+        match = current_items[index]
+    else:
+        cleaned = lower
+        for word in (
+            "roba", "pamirsk", "uzmirsk", "istrink",
+            "pasalink", "isimk", "isbrauk", "todo"
+        ):
+            cleaned = cleaned.replace(word, " ")
+        cleaned = re.sub(
+            r"\b(?:punkta|punktas|punktą|sarasa|sarasas|saraso)\b",
+            " ",
+            cleaned
+        )
+        cleaned = " ".join(cleaned.split())
+        match = find_best_todo_match(current_items, cleaned)
+
+    if not match:
+        return (
+            "Neradau tokio punkto dabartiniame TODO sąraše. "
+            "Parašyk „Roba, parodyk TODO“ 🙂"
+        )
+
+    (
+        supabase.table("roba_todo")
+        .delete()
+        .eq("id", match["id"])
+        .eq("chat_id", chat_id)
+        .execute()
+    )
+
+    return f"Ištryniau iš TODO 🗑️\n{match.get('task')}"
+
+
 def handle_todo(chat_id, sender_name, text):
 
     try:
@@ -2643,6 +2718,62 @@ def process_message(
             )
 
             return
+
+        # ----------------------------------------------------
+        # TODO TRYNIMAS TURI PRIORITETĄ PRIEŠ ATMINTIES "PAMIRŠK"
+        # ----------------------------------------------------
+
+        if text:
+
+            open_todo_items = get_todo_items(
+                chat_id,
+                "open"
+            )
+
+            if is_todo_delete_request(
+                text,
+                open_todo_items
+            ):
+
+                todo_delete_answer = handle_todo_delete_direct(
+                    chat_id=chat_id,
+                    text=text,
+                    current_items=open_todo_items
+                )
+
+                send_result = send_message(
+                    chat_id,
+                    todo_delete_answer,
+                    message_id
+                )
+
+                sent_message_id = (
+                    send_result
+                    .get("result", {})
+                    .get("message_id")
+                )
+
+                save_message_to_db(
+                    chat_id=chat_id,
+                    telegram_message_id=sent_message_id,
+                    sender_name="Roba",
+                    sender_id=BOT_ID,
+                    message_text=todo_delete_answer,
+                    has_photo=False,
+                    photo_file_id=None
+                )
+
+                history[chat_id].append(
+                    f"Roba: {todo_delete_answer}"
+                )
+
+                print(
+                    "TODO punktas istrintas tiesiogiai. "
+                    "Atminties pamirsimas nekvieciamas.",
+                    flush=True
+                )
+
+                return
 
         # ----------------------------------------------------
         # TIKRAS ILGALAIKĖS ATMINTIES PAMIRŠIMAS
