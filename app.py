@@ -967,17 +967,62 @@ def add_todo_item(chat_id, task, created_by):
     return result.data or []
 
 
+def normalize_todo_word(word):
+
+    word = word.lower().strip()
+
+    replacements = str.maketrans({
+        "ą": "a",
+        "č": "c",
+        "ę": "e",
+        "ė": "e",
+        "į": "i",
+        "š": "s",
+        "ų": "u",
+        "ū": "u",
+        "ž": "z"
+    })
+
+    return word.translate(replacements)
+
+
+def todo_word_stem(word):
+
+    word = normalize_todo_word(word)
+
+    # Paprastas lietuviškų galūnių trumpinimas.
+    # Tikslas – kad, pvz., powerbanką / powerbankas,
+    # nupirkti / nupirkom būtų atpažinti kaip artimi žodžiai.
+    endings = [
+        "omis", "uose", "uose", "imas", "ymas",
+        "ame", "eme", "iai", "iai", "ius",
+        "ais", "oms", "uos", "iai",
+        "as", "is", "ys", "us", "os", "es",
+        "ai", "ei", "ui", "am", "em",
+        "om", "im", "iu",
+        "a", "e", "i", "u", "o"
+    ]
+
+    for ending in endings:
+        if word.endswith(ending) and len(word) - len(ending) >= 5:
+            return word[:-len(ending)]
+
+    return word
+
+
 def find_best_todo_match(items, search_text):
 
     if not items:
         return None
 
-    search_words = set(
-        re.findall(
+    search_words = [
+        todo_word_stem(word)
+        for word in re.findall(
             r"[a-zA-ZąčęėįšųūžĄČĘĖĮŠŲŪŽ0-9]+",
             search_text.lower()
         )
-    )
+        if len(word) >= 3
+    ]
 
     if not search_words:
         return None
@@ -986,25 +1031,59 @@ def find_best_todo_match(items, search_text):
     best_score = 0
 
     for item in items:
+
         task = (item.get("task") or "").lower()
 
-        task_words = set(
-            re.findall(
+        task_words = [
+            todo_word_stem(word)
+            for word in re.findall(
                 r"[a-zA-ZąčęėįšųūžĄČĘĖĮŠŲŪŽ0-9]+",
                 task
             )
-        )
+            if len(word) >= 3
+        ]
 
-        score = len(search_words & task_words)
+        score = 0
 
-        if search_text.lower() in task:
+        for search_word in search_words:
+            for task_word in task_words:
+
+                if search_word == task_word:
+                    score += 4
+                    continue
+
+                shorter = min(
+                    len(search_word),
+                    len(task_word)
+                )
+
+                if (
+                    shorter >= 5
+                    and (
+                        search_word.startswith(task_word[:shorter])
+                        or task_word.startswith(search_word[:shorter])
+                    )
+                ):
+                    score += 2
+
+                elif (
+                    len(search_word) >= 6
+                    and len(task_word) >= 6
+                    and search_word[:6] == task_word[:6]
+                ):
+                    score += 2
+
+        normalized_search = normalize_todo_word(search_text)
+        normalized_task = normalize_todo_word(task)
+
+        if normalized_search in normalized_task:
             score += 5
 
         if score > best_score:
             best_score = score
             best_item = item
 
-    if best_score == 0:
+    if best_score < 2:
         return None
 
     return best_item
