@@ -5,6 +5,8 @@ import re
 import threading
 import urllib.request
 from collections import defaultdict, deque
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from flask import Flask, request, jsonify
 from openai import OpenAI
@@ -1234,6 +1236,195 @@ def handle_todo(chat_id, sender_name, text):
         return None
 
 
+
+# ============================================================
+# PRIMINIMAI
+# ============================================================
+
+REMINDER_PROMPT = """
+Tu esi Robos kelionės priminimų tvarkytojas.
+
+Žmogus prašo sukurti priminimą Telegram grupėje.
+Tau pateikiamas dabartinis Lietuvos laikas, ilgalaikė kelionės
+atmintis ir žmogaus žinutė.
+
+Nustatyk:
+1. ką reikės priminti;
+2. tikslų priminimo laiką Europe/Vilnius laiko juostoje.
+
+Suprask natūralias frazes, pvz.:
+- primink rytoj 10 val.;
+- primink lapkričio 25 d.;
+- primink lapkričio 25 d. 18:30;
+- primink likus 3 dienoms iki skrydžio.
+
+Jeigu žmogus nurodo datą, bet NENURODO valandos,
+naudok 09:00 Europe/Vilnius.
+
+Jeigu žmogus nurodo tik dienos dalį:
+- ryte -> 09:00
+- per pietus -> 12:00
+- vakare -> 19:00
+
+Jeigu laiko ar datos negalima patikimai nustatyti iš žinutės
+ir pateiktos atminties, nekurk datos iš spėjimo.
+
+Grąžink TIK validų JSON.
+
+Jeigu galima sukurti:
+{
+  "save": true,
+  "reminder_text": "Padaryti online check-in",
+  "remind_at": "2026-11-25T09:00:00+02:00"
+}
+
+Jeigu trūksta datos / laiko:
+{
+  "save": false,
+  "question": "Kada tau tai priminti?"
+}
+"""
+
+
+def is_reminder_request(text):
+
+    lower = (text or "").lower()
+
+    words = [
+        "primink",
+        "priminimą",
+        "priminima",
+        "priminimas"
+    ]
+
+    return any(word in lower for word in words)
+
+
+def save_reminder(
+    chat_id,
+    reminder_text,
+    remind_at,
+    created_by,
+    source_message_id
+):
+
+    result = (
+        supabase
+        .table("roba_reminders")
+        .insert({
+            "chat_id": chat_id,
+            "reminder_text": reminder_text,
+            "remind_at": remind_at,
+            "status": "pending",
+            "created_by": created_by,
+            "source_message_id": source_message_id
+        })
+        .execute()
+    )
+
+    return result.data or []
+
+
+def handle_reminder_request(
+    chat_id,
+    sender_name,
+    text,
+    message_id
+):
+
+    try:
+        vilnius_now = datetime.now(
+            ZoneInfo("Europe/Vilnius")
+        )
+
+        current_memory = get_long_term_memory(chat_id)
+
+        prompt = (
+            "DABARTINIS LIETUVOS LAIKAS:\n"
+            f"{vilnius_now.isoformat()}\n\n"
+            "ILGALAIKĖ KELIONĖS ATMINTIS:\n"
+            f"{current_memory or '(tuščia)'}\n\n"
+            "ŽMOGAUS ŽINUTĖ:\n"
+            f"{text}"
+        )
+
+        response = client.responses.create(
+            model="gpt-5.6-luna",
+            instructions=REMINDER_PROMPT,
+            input=prompt
+        )
+
+        raw = response.output_text.strip()
+
+        if raw.startswith("```"):
+            raw = raw.replace("```json", "", 1)
+            raw = raw.replace("```", "").strip()
+
+        decision = json.loads(raw)
+
+        if not decision.get("save"):
+            return (
+                decision.get("question")
+                or "Kada tau tai priminti? 🙂"
+            )
+
+        reminder_text = (
+            decision.get("reminder_text") or ""
+        ).strip()
+
+        remind_at = (
+            decision.get("remind_at") or ""
+        ).strip()
+
+        if not reminder_text or not remind_at:
+            return "Kada ir ką tiksliai priminti? 🙂"
+
+        # Patikriname, kad AI grąžino tikrą ISO datą.
+        parsed = datetime.fromisoformat(remind_at)
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(
+                tzinfo=ZoneInfo("Europe/Vilnius")
+            )
+
+        if parsed <= vilnius_now:
+            return (
+                "Šitas priminimo laikas jau praėjęs 🙂 "
+                "Parašyk naują laiką."
+            )
+
+        normalized_time = parsed.isoformat()
+
+        save_reminder(
+            chat_id=chat_id,
+            reminder_text=reminder_text,
+            remind_at=normalized_time,
+            created_by=sender_name,
+            source_message_id=message_id
+        )
+
+        pretty_time = parsed.astimezone(
+            ZoneInfo("Europe/Vilnius")
+        ).strftime("%Y-%m-%d %H:%M")
+
+        return (
+            "Priminimą išsaugojau ⏰\n"
+            f"📌 {reminder_text}\n"
+            f"🕒 {pretty_time}"
+        )
+
+    except Exception as e:
+        print(
+            f"Priminimo apdorojimo klaida: "
+            f"{type(e).__name__}: {e}",
+            flush=True
+        )
+
+        return (
+            "Nepavyko tiksliai sukurti priminimo 😅 "
+            "Pabandyk parašyti datą ir laiką aiškiau."
+        )
+
 # ============================================================
 # ILGALAIKĖS ATMINTIES PAMIRŠIMAS
 # ============================================================
@@ -1856,6 +2047,53 @@ def process_message(
 
             print(
                 "Atminties pamirsimo veiksmas atliktas.",
+                flush=True
+            )
+
+            return
+
+        # ----------------------------------------------------
+        # PRIMINIMO SUKŪRIMAS
+        # ----------------------------------------------------
+
+        if text and is_reminder_request(text):
+
+            reminder_answer = handle_reminder_request(
+                chat_id=chat_id,
+                sender_name=name,
+                text=text,
+                message_id=message_id
+            )
+
+            send_result = send_message(
+                chat_id,
+                reminder_answer,
+                message_id
+            )
+
+            sent_message_id = (
+                send_result
+                .get("result", {})
+                .get("message_id")
+            )
+
+            save_message_to_db(
+                chat_id=chat_id,
+                telegram_message_id=sent_message_id,
+                sender_name="Roba",
+                sender_id=BOT_ID,
+                message_text=reminder_answer,
+                has_photo=False,
+                photo_file_id=None
+            )
+
+            history[chat_id].append(
+                f"Roba: {reminder_answer}"
+            )
+
+            print(
+                "Priminimo veiksmas atliktas. "
+                "I ilgalaike atminti nededama.",
                 flush=True
             )
 
