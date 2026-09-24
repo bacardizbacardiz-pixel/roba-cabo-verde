@@ -1,6 +1,7 @@
 import os
 import json
 import base64
+import re
 import threading
 import urllib.request
 from collections import defaultdict, deque
@@ -359,6 +360,219 @@ luggage
 
 
 # ============================================================
+# NEMOKAMAS VIETINIS ATMINTIES FILTRAS
+# ============================================================
+
+MEMORY_KEYWORDS = [
+    # Sprendimai
+    "nusprend",
+    "pasirink",
+    "imam",
+    "imsim",
+    "imame",
+    "neimam",
+    "neimsim",
+    "važiuosim",
+    "vaziuosim",
+    "skrisim",
+    "vyksim",
+    "einam",
+    "darom",
+    "sutarem",
+    "sutarėm",
+    "persigalvoj",
+    "keičiam",
+    "keiciam",
+    "pakeit",
+    "atšauk",
+    "atsauk",
+
+    # Rezervacijos / pirkimai
+    "užsak",
+    "uzsak",
+    "rezerv",
+    "nupirk",
+    "pirkom",
+    "sumok",
+    "apmok",
+    "biliet",
+    "booking",
+
+    # Kelionės temos
+    "viešbut",
+    "viesbut",
+    "hotel",
+    "kambar",
+    "room",
+    "skryd",
+    "flight",
+    "enter air",
+    "tui",
+    "transfer",
+    "taksi",
+    "taxi",
+    "oro uost",
+    "airport",
+    "parking",
+    "parkav",
+    "lagamin",
+    "bagaž",
+    "bagaz",
+    "powerbank",
+    "restoran",
+    "ekskurs",
+    "kelion",
+    "cabo verde",
+    "cape verde",
+    "sal ",
+    "santa maria",
+    "riu",
+    "novotel",
+
+    # Planai / laikas
+    "planuoj",
+    "planas",
+    "data",
+    "išvyk",
+    "isvyk",
+    "atvyk",
+    "nakvyn",
+    "ryte",
+    "vakare",
+
+    # Preferencijos
+    "norim",
+    "norėsim",
+    "noresim",
+    "labiau patinka",
+    "patinka",
+    "nenorim",
+    "svarbu",
+    "prioritet"
+]
+
+
+TRIVIAL_MESSAGES = {
+    "ok",
+    "oki",
+    "okay",
+    "gerai",
+    "jo",
+    "joo",
+    "taip",
+    "ne",
+    "nu",
+    "aha",
+    "mhm",
+    "aciu",
+    "ačiū",
+    "thanks",
+    "super",
+    "puiku",
+    "lol",
+    "haha",
+    "hehe"
+}
+
+
+def should_analyze_for_memory(text):
+    """
+    Nemokamas Python filtras.
+
+    True  -> verta klausti AI, ar saugoti į ilgalaikę atmintį.
+    False -> AI atminties analizatorius apskritai nekviečiamas.
+    """
+
+    if not text:
+        return False
+
+    cleaned = text.strip()
+    lower = cleaned.lower()
+
+    # Per trumpa.
+    if len(cleaned) < 8:
+        return False
+
+    # Dažnos bereikšmės reakcijos.
+    normalized = re.sub(
+        r"[^\wąčęėįšųūž]+",
+        "",
+        lower,
+        flags=re.UNICODE
+    )
+
+    if normalized in TRIVIAL_MESSAGES:
+        return False
+
+    # Jei praktiškai vien emoji / simboliai.
+    letters_or_numbers = re.findall(
+        r"[A-Za-zĄČĘĖĮŠŲŪŽąčęėįšųūž0-9]",
+        cleaned
+    )
+
+    if len(letters_or_numbers) < 4:
+        return False
+
+    # Klausimas be jokių kelionės / sprendimo požymių
+    # dažniausiai nėra naujas ilgalaikis faktas.
+    is_question = "?" in cleaned
+
+    # Raktažodžiai.
+    keyword_hit = any(
+        keyword in lower
+        for keyword in MEMORY_KEYWORDS
+    )
+
+    if keyword_hit:
+        return True
+
+    # Datos: 30.11, 2026-11-30, 30/11 ir pan.
+    has_date = bool(
+        re.search(
+            r"\b("
+            r"\d{1,2}[./-]\d{1,2}"
+            r"(?:[./-]\d{2,4})?"
+            r"|20\d{2}[./-]\d{1,2}[./-]\d{1,2}"
+            r")\b",
+            cleaned
+        )
+    )
+
+    if has_date:
+        return True
+
+    # Kainos / valiutos.
+    has_money = bool(
+        re.search(
+            r"\b\d+(?:[.,]\d+)?\s*"
+            r"(?:€|eur|zl|pln|cve|usd|doler)",
+            lower
+        )
+    )
+
+    if has_money:
+        return True
+
+    # Konkretus laikas gali būti svarbus kelionės plane.
+    has_time = bool(
+        re.search(
+            r"\b(?:[01]?\d|2[0-3])[:.][0-5]\d\b",
+            lower
+        )
+    )
+
+    if has_time:
+        return True
+
+    # Ilgesnis teiginys gali turėti svarbią informaciją,
+    # tačiau paprastų klausimų be raktažodžių nesiunčiame.
+    if not is_question and len(cleaned) >= 80:
+        return True
+
+    return False
+
+
+# ============================================================
 # SUPABASE – ŽINUČIŲ SAUGOJIMAS
 # ============================================================
 
@@ -591,11 +805,6 @@ def analyze_message_for_memory(
     if not message_text:
         return
 
-    # Labai trumpos žinutės dažniausiai nėra vertos
-    # papildomo AI kvietimo.
-    if len(message_text.strip()) < 8:
-        return
-
     try:
 
         current_memory = (
@@ -637,7 +846,8 @@ def analyze_message_for_memory(
 
         if not decision.get("save"):
             print(
-                "Zinute neverta ilgalaikes atminties.",
+                "AI nusprende: "
+                "zinute neverta ilgalaikes atminties.",
                 flush=True
             )
             return
@@ -989,10 +1199,16 @@ def process_message(
             )
 
         # ----------------------------------------------------
-        # AUTOMATINĖ ILGALAIKĖ ATMINTIS
+        # OPTIMIZUOTA ILGALAIKĖ ATMINTIS
         # ----------------------------------------------------
 
-        if text:
+        if text and should_analyze_for_memory(text):
+
+            print(
+                "Vietinis filtras: "
+                "zinute gali buti svarbi -> kvieciamas AI.",
+                flush=True
+            )
 
             try:
 
@@ -1015,6 +1231,14 @@ def process_message(
                     f"atminties analizes: {e}",
                     flush=True
                 )
+
+        elif text:
+
+            print(
+                "Vietinis filtras: "
+                "ilgalaikes atminties AI nekvieciamas.",
+                flush=True
+            )
 
         # ----------------------------------------------------
         # AR ROBĄ KVIEČIA?
@@ -1045,7 +1269,7 @@ def process_message(
 
             print(
                 "Roba nekviestas - "
-                "zinute issaugota atmintyje.",
+                "zinute issaugota pokalbiu istorijoje.",
                 flush=True
             )
 
