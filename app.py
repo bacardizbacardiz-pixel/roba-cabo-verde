@@ -197,6 +197,15 @@ Pavyzdžiui:
 
 Neišgalvok aktualių faktų.
 
+DATOS IR LAIKAI:
+- Niekada nepridėk konkretaus skrydžio, išvykimo ar rezervacijos laiko,
+  jeigu jis nėra aiškiai pateiktas atmintyje, pokalbyje, nuotraukoje
+  arba patikimame paieškos rezultate.
+- Skaičiuodamas „kiek liko iki kelionės“, jei žinai tik kelionės datą,
+  pateik dienų skaičių ir datą, bet nesugalvok valandos.
+- Jei keli atminties įrašai konfliktuoja, aiškiai pasakyk, kad yra
+  neatitikimas, o ne pasirink atsitiktinę reikšmę.
+
 
 
 ============================================================
@@ -281,14 +290,23 @@ Jeigu reikia:
 memory_key naudok mažosiomis lotyniškomis raidėmis,
 skaičiais ir underscore.
 
-Pavyzdžiai:
+Naudok šiuos STABILIUS raktus, kai tema atitinka:
 hotel_warsaw
 airport_transfer
 room_type
 flight_outbound
 flight_return
+travel_dates
+traveler_count
+meal_plan
+travel_insurance
+reservation_total_price
 excursion_sal
 luggage
+powerbank
+
+Nekurk naujo rakto su data ar kitu sinonimu, jeigu tinka vienas iš
+aukščiau esančių stabilių raktų.
 """
 
 
@@ -348,6 +366,23 @@ Vienoje nuotraukoje gali būti keli skirtingi svarbūs faktai.
 
 Jeigu faktas keičia ankstesnę informaciją, naudok tokį patį
 memory_key kaip tos temos ankstesniame įraše.
+
+Kai tema atitinka, PRIVALOMAI naudok šiuos stabilius raktus:
+flight_outbound
+flight_return
+travel_dates
+traveler_count
+meal_plan
+room_type
+travel_insurance
+reservation_total_price
+hotel_warsaw
+airport_transfer
+excursion_sal
+powerbank
+
+Nekurk datos memory_key pavadinime ir nekurk sinoniminio rakto,
+jeigu tinka vienas iš šių raktų.
 
 Grąžink TIK validų JSON.
 """
@@ -713,6 +748,59 @@ def get_last_photo_from_db(chat_id):
         return None
 
 
+
+# ============================================================
+# STABILŪS ILGALAIKĖS ATMINTIES RAKTAI
+# ============================================================
+
+MEMORY_KEY_ALIASES = {
+    "flight_departure_warsaw_2026-11-30": "flight_outbound",
+    "outbound_flight": "flight_outbound",
+    "flight_outbound": "flight_outbound",
+
+    "flight_return_sal_2026-12-07": "flight_return",
+    "return_flight": "flight_return",
+    "flight_return": "flight_return",
+
+    "travel_dates_sal_2026-11-30_2026-12-08": "travel_dates",
+    "reservation_dates": "travel_dates",
+    "travel_dates": "travel_dates",
+
+    "travel_group_4_adults": "traveler_count",
+    "traveler_count": "traveler_count",
+
+    "sal_package_all_inclusive": "meal_plan",
+    "meal_plan": "meal_plan",
+
+    "sal_rooms_2_double": "room_type",
+    "room_type": "room_type",
+
+    "travel_insurance_sal_2026": "travel_insurance",
+    "travel_insurance": "travel_insurance",
+
+    "sal_reservation_total_price": "reservation_total_price",
+    "reservation_total_price": "reservation_total_price",
+
+    "powerbankas": "powerbank",
+    "powerbank": "powerbank"
+}
+
+
+def canonical_memory_key(memory_key):
+
+    key = (memory_key or "").strip().lower()
+
+    key = re.sub(
+        r"[^a-z0-9_]+",
+        "_",
+        key
+    ).strip("_")
+
+    return MEMORY_KEY_ALIASES.get(
+        key,
+        key
+    )
+
 # ============================================================
 # SUPABASE – ILGALAIKĖ ATMINTIS
 # ============================================================
@@ -769,6 +857,10 @@ def save_long_term_memory(
 ):
 
     try:
+
+        memory_key = canonical_memory_key(
+            memory_key
+        )
 
         existing = (
             supabase
