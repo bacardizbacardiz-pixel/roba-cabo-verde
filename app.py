@@ -7,31 +7,48 @@ from collections import defaultdict, deque
 
 from flask import Flask, request, jsonify
 from openai import OpenAI
+from supabase import create_client
 
+
+# ============================================================
+# NUSTATYMAI
+# ============================================================
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 
+SUPABASE_URL = os.environ["SUPABASE_URL"]
+SUPABASE_KEY = os.environ["SUPABASE_KEY"]
+
 WEBHOOK_URL = "https://roba-cabo-verde.onrender.com/telegram"
 
+
+# ============================================================
+# KLIENTAI
+# ============================================================
+
 client = OpenAI(api_key=OPENAI_API_KEY)
+
+supabase = create_client(
+    SUPABASE_URL,
+    SUPABASE_KEY
+)
+
 web = Flask(__name__)
 
 
 # ============================================================
-# ATMINTIS
+# LAIKINA RAM ATMINTIS
 # ============================================================
 
-# Paskutinės 100 grupės pokalbio žinučių.
-# Saugomos žmonių žinutės ir Robos atsakymai.
-# SVARBU: kol kas tai RAM atmintis ir po Render restarto dingsta.
+# RAM istoriją paliekame dėl greičio.
+# Tačiau pagrindinė žinučių istorija dabar bus ir Supabase.
 history = defaultdict(lambda: deque(maxlen=100))
 
-# Paskutinė grupėje įkelta nuotrauka.
+# Paskutinė nuotrauka.
 last_photo = {}
 
-# Ar paskutinė nuotrauka jau buvo perduota Robai.
-# False = dar neanalizuota.
+# Ar nuotrauka jau buvo perduota Robai.
 photo_used = defaultdict(lambda: True)
 
 BOT_ID = None
@@ -88,8 +105,6 @@ KAMBARIAI:
 - Yra mintis atvykus į viešbutį registratūroje pasiteirauti
   dėl mokamo kambario upgrade, jeigu bus laisvų geresnių kambarių.
 - Buvo nagrinėjami TUI kambarių kodai DZX1 ir DZX2.
-- Buvo svarstoma, ar DZX2 kambariai gali būti patogesnėje
-  viešbučio dalyje arba arčiau baseinų.
 
 VIEŠBUČIŲ PALYGINIMAS:
 
@@ -107,8 +122,7 @@ Tarp anksčiau aptartų Riu privalumų buvo:
 - stipresnių gėrimų dozatoriai kambariuose;
 - didelė viešbučio teritorija;
 - vandens parkas / vandens atrakcionai;
-- gerai vertinamas paplūdimys;
-- buvo domėtasi gultų prie baseinų prieinamumu.
+- gerai vertinamas paplūdimys.
 
 Vandens parkas nelaikomas didele problema, nors grupė
 nenori labai triukšmingo, vien šeimoms su vaikais skirto poilsio.
@@ -141,11 +155,9 @@ VARŠUVA PRIEŠ SKRYDĮ:
   pailsėti, nusiprausti, persirengti ir pavakarieniauti.
 - Netoliese buvo aptarta lėktuvų stebėjimo vieta
   („plane spotting hill“).
-- Buvo pastebėta, kad rezervaciją galima atšaukti,
-  todėl planą galima koreguoti, jeigu pasikeistų skrydžio laikas.
 
 
-POWERBANKAI IR SKRYDIS:
+POWERBANKAI:
 
 - Grupėje buvo kalbėta apie powerbankus ilgam skrydžiui.
 - Buvo svarstoma, kad Enter Air lėktuve gali nebūti patogaus
@@ -153,17 +165,12 @@ POWERBANKAI IR SKRYDIS:
 - Todėl prieš kelionę verta turėti įkrautus powerbankus.
 
 
-TRANSFERIS SAL SALOJE:
+TRANSFERIS:
 
 - TUI siūlė mokamą privatų transferį tarp Sal oro uosto
   ir viešbučio.
-- Buvo minima maždaug 340 PLN kaina keturiems žmonėms
-  už TUI siūlytą transferio variantą.
+- Buvo minima maždaug 340 PLN kaina keturiems žmonėms.
 - Dėl to buvo svarstoma vietoj jo naudotis taksi.
-- Buvo domėtasi taksi kaina keturiems žmonėms tarp SID oro
-  uosto ir Santa Maria / Riu Palace Santa Maria.
-- Reikia prisiminti, kad transporto reikės ir kelionei
-  atgal į oro uostą.
 
 
 SAL IR CABO VERDE:
@@ -172,19 +179,14 @@ Grupė jau domėjosi:
 
 - Cabo Verde valiuta;
 - Cabo Verde escudo (CVE);
-- EUR ir CVE santykiu;
 - bankomatais Sal saloje;
 - vietinėmis kainomis;
-- viešbučių darbuotojų atlyginimais;
 - orais lapkritį ir gruodį;
 - vėjo stiprumu;
 - Atlanto vandenyno temperatūra;
-- lietinguoju sezonu;
 - high season laikotarpiu;
 - Sal paplūdimiais;
-- rykliais prie Sal salos;
-- ryklių atakų rizika;
-- kokiu atstumu rykliai paprastai būna nuo kranto;
+- rykliais;
 - restoranais;
 - vietiniu maistu;
 - veiklomis ir ekskursijomis.
@@ -194,18 +196,8 @@ SVARBI ATMINTIES TAISYKLĖ:
 
 Ši pradinė informacija nėra nekintanti tiesa.
 
-Jeigu vėlesniame Telegram pokalbyje grupės nariai pakeičia:
-
-- kelionės datas;
-- viešbutį;
-- kambarius;
-- skrydį;
-- transferį;
-- Varšuvos planą;
-- žmonių skaičių;
-- ar bet kurį kitą planą,
-
-visada laikyk naujesnę informaciją teisingesne.
+Jeigu vėlesniame Telegram pokalbyje grupės nariai pakeičia
+planą, visada laikyk naujesnę informaciją teisingesne.
 
 Nesakyk žmonėms, kad šią informaciją gavai iš SYSTEM_PROMPT.
 
@@ -214,29 +206,31 @@ kelionės kontekstą.
 
 
 ============================================================
+ILGALAIKĖ ATMINTIS
+============================================================
+
+Tau gali būti pateikta ilgalaikė Robos atmintis iš duomenų bazės.
+
+Tai yra ankstesni svarbūs grupės faktai ir sprendimai.
+
+Naudok juos natūraliai.
+
+Jeigu ilgalaikė atmintis prieštarauja naujesniam grupės
+pokalbiui, naujesnė informacija turi pirmenybę.
+
+
+============================================================
 POKALBIO KONTEKSTAS
 ============================================================
 
 Tau pateikiamas paskutinių grupės pokalbių kontekstas.
 
-Jame yra:
+Jame gali būti:
 - grupės narių žinutės;
-- ankstesni tavo paties atsakymai;
-- informacija apie įkeltas nuotraukas.
+- ankstesni tavo atsakymai;
+- informacija apie nuotraukas.
 
 Naudok ankstesnį pokalbį natūraliai.
-
-Jeigu prieš tai kalbėjote apie konkretų viešbutį, vietą,
-skrydį, restoraną, nuotrauką ar kitą objektą, suprask tokius
-tęsinius kaip:
-
-„o ką apie jį manai?“
-„o kaip ten paplūdimys?“
-„papasakok daugiau“
-„o kiek kainuoja?“
-„o kaip maistas?“
-„ar verta?“
-„o ten toli?“
 
 Neprašyk žmogaus kartoti informacijos, kuri jau yra
 pokalbio kontekste.
@@ -248,14 +242,10 @@ NUOTRAUKOS
 
 Tau gali būti perduota Telegram grupėje įkelta nuotrauka.
 
-Jeigu kartu su klausimu gavai nuotrauką, analizuok ją ir
-naudok jos informaciją atsakymui.
+Jeigu kartu su klausimu gavai nuotrauką, analizuok ją.
 
-Jeigu nuotraukoje atpažįsti konkretų objektą, viešbutį,
-vietą, dokumentą ar kitą informaciją, aiškiai įvardyk ją
-atsakyme.
-
-Tada ši informacija taps tolesnio pokalbio kontekstu.
+Jeigu atpažįsti konkretų viešbutį, vietą, dokumentą ar
+kitą informaciją, aiškiai įvardyk ją atsakyme.
 
 
 ============================================================
@@ -269,20 +259,15 @@ informacija, naudok interneto paiešką pats.
 
 Pavyzdžiui:
 
-- orai ir prognozės;
+- orai;
 - skrydžių laikai;
 - viešbučių informacija;
-- viešbučių atsiliepimai;
+- atsiliepimai;
 - restoranai;
 - kainos;
 - darbo laikas;
 - naujienos;
-- valiutų kursai;
-- kelionių informacija.
-
-Jeigu žmogus klausia, ką manai apie konkretų viešbutį,
-gali pats internete patikrinti jo informaciją, atsiliepimus,
-vietą, paplūdimį, maistą ar kitus aktualius faktus.
+- valiutų kursai.
 
 Žmogui nereikia pateikti nuorodos.
 
@@ -304,9 +289,160 @@ Atsakyk, kai:
 Jeigu žmogus daro Reply į tavo žinutę, suprask tai kaip
 tęstinį pokalbį net jeigu žodis „Roba“ nepaminėtas.
 
-Elkis kaip normalus draugiškas grupės dalyvis,
-o ne kaip formalus klientų aptarnavimo botas.
+Elkis kaip normalus draugiškas grupės dalyvis.
 """
+
+
+# ============================================================
+# SUPABASE – ŽINUČIŲ SAUGOJIMAS
+# ============================================================
+
+def save_message_to_db(
+    chat_id,
+    telegram_message_id,
+    sender_name,
+    sender_id,
+    message_text,
+    has_photo=False
+):
+    try:
+
+        supabase.table(
+            "roba_messages"
+        ).insert({
+            "chat_id": chat_id,
+            "telegram_message_id": telegram_message_id,
+            "sender_name": sender_name,
+            "sender_id": sender_id,
+            "message_text": message_text,
+            "has_photo": has_photo
+        }).execute()
+
+        print(
+            "Zinute issaugota Supabase.",
+            flush=True
+        )
+
+    except Exception as e:
+
+        print(
+            f"Supabase zinutes saugojimo klaida: {e}",
+            flush=True
+        )
+
+
+def get_recent_messages_from_db(
+    chat_id,
+    limit=60
+):
+    try:
+
+        result = (
+            supabase
+            .table("roba_messages")
+            .select(
+                "sender_name,message_text,"
+                "has_photo,created_at"
+            )
+            .eq("chat_id", chat_id)
+            .order(
+                "created_at",
+                desc=True
+            )
+            .limit(limit)
+            .execute()
+        )
+
+        rows = result.data or []
+
+        rows.reverse()
+
+        messages = []
+
+        for row in rows:
+
+            sender = (
+                row.get("sender_name")
+                or "Dalyvis"
+            )
+
+            text = (
+                row.get("message_text")
+                or ""
+            )
+
+            if row.get("has_photo"):
+
+                if text:
+                    text += " [pridėta nuotrauka]"
+                else:
+                    text = "[pridėta nuotrauka]"
+
+            if text:
+
+                messages.append(
+                    f"{sender}: {text}"
+                )
+
+        return messages
+
+    except Exception as e:
+
+        print(
+            f"Supabase istorijos skaitymo klaida: {e}",
+            flush=True
+        )
+
+        return []
+
+
+# ============================================================
+# SUPABASE – ILGALAIKĖ ATMINTIS
+# ============================================================
+
+def get_long_term_memory(chat_id):
+
+    try:
+
+        result = (
+            supabase
+            .table("roba_memory")
+            .select(
+                "memory,category,created_at"
+            )
+            .eq("chat_id", chat_id)
+            .order(
+                "created_at",
+                desc=False
+            )
+            .limit(100)
+            .execute()
+        )
+
+        rows = result.data or []
+
+        memories = []
+
+        for row in rows:
+
+            memory = row.get("memory")
+
+            if memory:
+
+                memories.append(
+                    f"- {memory}"
+                )
+
+        return "\n".join(memories)
+
+    except Exception as e:
+
+        print(
+            f"Supabase atminties skaitymo klaida: {e}",
+            flush=True
+        )
+
+        return ""
 
 
 # ============================================================
@@ -323,7 +459,9 @@ def telegram_api(method, payload=None):
         f"bot{TELEGRAM_TOKEN}/{method}"
     )
 
-    data = json.dumps(payload).encode("utf-8")
+    data = json.dumps(
+        payload
+    ).encode("utf-8")
 
     req = urllib.request.Request(
         url,
@@ -344,6 +482,7 @@ def telegram_api(method, payload=None):
         )
 
     if not result.get("ok"):
+
         raise RuntimeError(
             f"Telegram API klaida: {result}"
         )
@@ -361,7 +500,10 @@ def get_bot_identity():
 
     result = telegram_api("getMe")
 
-    bot = result.get("result", {})
+    bot = result.get(
+        "result",
+        {}
+    )
 
     BOT_ID = bot.get("id")
 
@@ -482,13 +624,9 @@ def is_reply_to_roba(message):
         {}
     )
 
-    reply_user_id = reply_from.get(
-        "id"
-    )
-
     if (
         BOT_ID
-        and reply_user_id == BOT_ID
+        and reply_from.get("id") == BOT_ID
     ):
         return True
 
@@ -550,6 +688,7 @@ def get_reply_context(message):
 def process_message(
     chat_id,
     message_id,
+    sender_id,
     name,
     text,
     photo_file_id,
@@ -568,7 +707,7 @@ def process_message(
         )
 
         # ----------------------------------------------------
-        # NAUJA NUOTRAUKA
+        # NUOTRAUKA
         # ----------------------------------------------------
 
         if photo_file_id:
@@ -580,34 +719,35 @@ def process_message(
                 "caption": text
             }
 
-            # Šios nuotraukos Roba dar nematė.
             photo_used[chat_id] = False
 
             print(
-                "Nauja nuotrauka isiminta. "
-                "Ji dar neanalizuota.",
+                "Nauja nuotrauka isiminta.",
                 flush=True
             )
 
         # ----------------------------------------------------
-        # ŽMOGAUS ŽINUTĖ → ISTORIJA
+        # ŽMOGAUS ŽINUTĘ SAUGOME SUPABASE
         # ----------------------------------------------------
 
+        save_message_to_db(
+            chat_id=chat_id,
+            telegram_message_id=message_id,
+            sender_name=name,
+            sender_id=sender_id,
+            message_text=text,
+            has_photo=bool(photo_file_id)
+        )
+
+        # RAM kopija
         history_text = text
 
         if photo_file_id:
 
             if history_text:
-
-                history_text += (
-                    " [pridėta nuotrauka]"
-                )
-
+                history_text += " [pridėta nuotrauka]"
             else:
-
-                history_text = (
-                    "[pridėta nuotrauka]"
-                )
+                history_text = "[pridėta nuotrauka]"
 
         if history_text:
 
@@ -644,19 +784,59 @@ def process_message(
 
             print(
                 "Roba nekviestas - "
-                "zinute tik isiminta.",
+                "zinute issaugota atmintyje.",
                 flush=True
             )
 
             return
 
         # ----------------------------------------------------
-        # POKALBIO KONTEKSTAS
+        # ISTORIJA IŠ SUPABASE
         # ----------------------------------------------------
 
-        conversation = "\n".join(
-            history[chat_id]
+        db_messages = (
+            get_recent_messages_from_db(
+                chat_id,
+                limit=60
+            )
         )
+
+        if db_messages:
+
+            conversation = "\n".join(
+                db_messages
+            )
+
+            print(
+                f"Is Supabase gauta "
+                f"{len(db_messages)} zinuciu.",
+                flush=True
+            )
+
+        else:
+
+            conversation = "\n".join(
+                history[chat_id]
+            )
+
+            print(
+                "Naudojama RAM istorija.",
+                flush=True
+            )
+
+        # ----------------------------------------------------
+        # ILGALAIKĖ ATMINTIS
+        # ----------------------------------------------------
+
+        long_term_memory = (
+            get_long_term_memory(
+                chat_id
+            )
+        )
+
+        # ----------------------------------------------------
+        # TYPING
+        # ----------------------------------------------------
 
         try:
 
@@ -675,9 +855,14 @@ def process_message(
                 flush=True
             )
 
+        # ----------------------------------------------------
+        # PROMPT
+        # ----------------------------------------------------
+
         prompt_text = (
-            "Paskutinis grupės pokalbio "
-            "kontekstas:\n\n"
+            "ILGALAIKĖ ROBOS ATMINTIS:\n\n"
+            f"{long_term_memory or '(dar nėra)'}\n\n"
+            "PASKUTINIS GRUPĖS POKALBIS:\n\n"
             f"{conversation}\n"
             f"{reply_context}\n"
             "Atsakyk į naujausią "
@@ -698,17 +883,10 @@ def process_message(
 
         image_file_id = None
 
-        # Jeigu Roba kviečiamas žinute,
-        # prie kurios tiesiogiai pridėta nuotrauka.
         if photo_file_id:
 
             image_file_id = photo_file_id
 
-        # Jeigu prieš tai grupėje buvo įkelta nuotrauka
-        # ir Roba jos dar neanalizavo, pirmas kitas
-        # kreipinys į Robą automatiškai gauna nuotrauką.
-        #
-        # Jokių raktažodžių.
         elif (
             chat_id in last_photo
             and not photo_used[chat_id]
@@ -719,15 +897,10 @@ def process_message(
             )
 
             print(
-                "Prie pirmo kreipinio "
-                "pridedama paskutine "
+                "Pridedama paskutine "
                 "neanalizuota nuotrauka.",
                 flush=True
             )
-
-        # ----------------------------------------------------
-        # NUOTRAUKA → OPENAI
-        # ----------------------------------------------------
 
         if image_file_id:
 
@@ -797,15 +970,14 @@ def process_message(
         if not answer:
 
             print(
-                "OpenAI grazino "
-                "tuscia atsakyma.",
+                "OpenAI grazino tuscia atsakyma.",
                 flush=True
             )
 
             return
 
         # ----------------------------------------------------
-        # TELEGRAM ATSAKYMAS
+        # SIUNČIAME Į TELEGRAM
         # ----------------------------------------------------
 
         send_result = send_message(
@@ -815,15 +987,28 @@ def process_message(
         )
 
         # ----------------------------------------------------
-        # ROBOS ATSAKYMAS → ISTORIJA
+        # ROBOS ATSAKYMĄ SAUGOME SUPABASE
         # ----------------------------------------------------
+
+        sent_message_id = (
+            send_result
+            .get("result", {})
+            .get("message_id")
+        )
+
+        save_message_to_db(
+            chat_id=chat_id,
+            telegram_message_id=sent_message_id,
+            sender_name="Roba",
+            sender_id=BOT_ID,
+            message_text=answer,
+            has_photo=False
+        )
 
         history[chat_id].append(
             f"Roba: {answer}"
         )
 
-        # Jeigu prie šio atsakymo siuntėme nuotrauką,
-        # laikome, kad Roba ją jau išanalizavo.
         if image_file_id:
 
             photo_used[chat_id] = True
@@ -833,12 +1018,6 @@ def process_message(
                 "kaip analizuota.",
                 flush=True
             )
-
-        sent_message_id = (
-            send_result
-            .get("result", {})
-            .get("message_id")
-        )
 
         print(
             f"Roba atsake i Telegram. "
@@ -945,6 +1124,8 @@ def telegram_webhook():
             "message_id"
         )
 
+        sender_id = user.get("id")
+
         if not chat_id:
 
             return "OK", 200
@@ -978,9 +1159,6 @@ def telegram_webhook():
 
         if photos:
 
-            # Telegram pateikia kelias tos pačios
-            # nuotraukos rezoliucijas.
-            # Imam didžiausią.
             photo_file_id = (
                 photos[-1]
                 .get("file_id")
@@ -1002,10 +1180,6 @@ def telegram_webhook():
             )
         )
 
-        # ----------------------------------------------------
-        # NIEKO NAUDINGO
-        # ----------------------------------------------------
-
         if (
             not text
             and not photo_file_id
@@ -1022,6 +1196,7 @@ def telegram_webhook():
             args=(
                 chat_id,
                 message_id,
+                sender_id,
                 name,
                 text,
                 photo_file_id,
@@ -1069,23 +1244,12 @@ def setup_webhook():
             }
         )
 
-        print(
-            f"Webhook nustatytas: "
-            f"{result}",
-            flush=True
-        )
-
         return jsonify({
             "status": "OK",
             "telegram": result
         })
 
     except Exception as e:
-
-        print(
-            f"Webhook setup klaida: {e}",
-            flush=True
-        )
 
         return jsonify({
             "status": "ERROR",
