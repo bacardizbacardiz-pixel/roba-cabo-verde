@@ -17,9 +17,18 @@ WEBHOOK_URL = "https://roba-cabo-verde.onrender.com/telegram"
 client = OpenAI(api_key=OPENAI_API_KEY)
 web = Flask(__name__)
 
-# Laikina grupės pokalbio atmintis.
-# Po Render restarto ji išsivalys.
+
+# --------------------------------------------------
+# LAIKINA ATMINTIS
+# --------------------------------------------------
+
+# Paskutinės 100 tekstinių žinučių kiekvienam chatui.
 history = defaultdict(lambda: deque(maxlen=100))
+
+# Paskutinė Telegram nuotrauka kiekvienam chatui.
+# Saugome Telegram file_id, todėl nereikia laikyti
+# pačios nuotraukos Render atmintyje.
+last_photo = {}
 
 
 SYSTEM_PROMPT = """
@@ -36,7 +45,9 @@ Tau pateikiamas paskutinių grupės pokalbių kontekstas.
 Naudok jį, kad suprastum, apie ką grupės nariai kalba.
 
 Tu gali matyti tau perduotas nuotraukas ir screenshotus.
-Analizuok jų turinį kartu su žmogaus parašytu tekstu.
+Jeigu žmogus klausia apie paveikslėlį, nuotrauką, screenshotą,
+vaizdą arba tai, kas buvo įkelta aukščiau, analizuok tau
+perduotą nuotrauką.
 
 Tu turi interneto paieškos įrankį.
 
@@ -69,6 +80,10 @@ o ne kaip formalus klientų aptarnavimo botas.
 """
 
 
+# --------------------------------------------------
+# TELEGRAM API
+# --------------------------------------------------
+
 def telegram_api(method, payload=None):
     if payload is None:
         payload = {}
@@ -83,7 +98,9 @@ def telegram_api(method, payload=None):
     req = urllib.request.Request(
         url,
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json"
+        },
         method="POST"
     )
 
@@ -91,6 +108,7 @@ def telegram_api(method, payload=None):
         req,
         timeout=30
     ) as response:
+
         result = json.loads(
             response.read().decode("utf-8")
         )
@@ -124,10 +142,14 @@ def send_message(
     )
 
 
+# --------------------------------------------------
+# TELEGRAM NUOTRAUKOS
+# --------------------------------------------------
+
 def get_telegram_photo_base64(file_id):
     """
-    Parsisiunčia Telegram nuotrauką ir paverčia
-    ją į base64 data URL, kurį supranta OpenAI.
+    Pagal Telegram file_id parsisiunčia nuotrauką
+    ir paverčia ją į base64 data URL OpenAI.
     """
 
     file_info = telegram_api(
@@ -158,6 +180,7 @@ def get_telegram_photo_base64(file_id):
         file_url,
         timeout=30
     ) as response:
+
         image_bytes = response.read()
 
     encoded = base64.b64encode(
@@ -172,8 +195,10 @@ def get_telegram_photo_base64(file_id):
 
     if extension == "png":
         mime_type = "image/png"
+
     elif extension == "webp":
         mime_type = "image/webp"
+
     else:
         mime_type = "image/jpeg"
 
@@ -182,6 +207,40 @@ def get_telegram_photo_base64(file_id):
         f"{encoded}"
     )
 
+
+# --------------------------------------------------
+# AR KLAUSIMAS APIE NUOTRAUKĄ?
+# --------------------------------------------------
+
+def asks_about_photo(text):
+    text = text.lower()
+
+    photo_words = [
+        "nuotrauk",
+        "paveiks",
+        "foto",
+        "screenshot",
+        "screen shot",
+        "ekrano",
+        "vaizd",
+        "aukščiau",
+        "auksciau",
+        "įkėliau",
+        "ikeliau",
+        "atsiunčiau",
+        "atsiunciau",
+        "prikabinau"
+    ]
+
+    return any(
+        word in text
+        for word in photo_words
+    )
+
+
+# --------------------------------------------------
+# ŽINUTĖS APDOROJIMAS
+# --------------------------------------------------
 
 def process_message(
     chat_id,
@@ -199,21 +258,50 @@ def process_message(
             flush=True
         )
 
-        #
-        # Įsimenam žinutę pokalbio kontekstui
-        #
+        # ------------------------------------------
+        # JEIGU ATĖJO NAUJA NUOTRAUKA
+        # ------------------------------------------
+
+        if photo_file_id:
+
+            last_photo[chat_id] = {
+                "file_id": photo_file_id,
+                "message_id": message_id,
+                "name": name,
+                "caption": text
+            }
+
+            print(
+                "Paskutine nuotrauka isiminta.",
+                flush=True
+            )
+
+        # ------------------------------------------
+        # ĮSIMENAM POKALBIO TEKSTĄ
+        # ------------------------------------------
 
         history_text = text
 
         if photo_file_id:
-            if history_text:
-                history_text += " [atsiuntė nuotrauką]"
-            else:
-                history_text = "[atsiuntė nuotrauką]"
 
-        history[chat_id].append(
-            f"{name}: {history_text}"
-        )
+            if history_text:
+                history_text += (
+                    " [atsiuntė nuotrauką]"
+                )
+            else:
+                history_text = (
+                    "[atsiuntė nuotrauką]"
+                )
+
+        if history_text:
+
+            history[chat_id].append(
+                f"{name}: {history_text}"
+            )
+
+        # ------------------------------------------
+        # AR KREIPĖSI Į ROBĄ?
+        # ------------------------------------------
 
         lower_text = text.lower()
 
@@ -222,17 +310,14 @@ def process_message(
             or "@robacaboverde_bot" in lower_text
         )
 
-        #
-        # Jei Roba nepaminėtas,
-        # žinutę tik išsaugom kontekstui.
-        #
-
         if not called_roba:
+
             print(
                 "Roba nepaminetas - "
                 "zinute tik isiminta.",
                 flush=True
             )
+
             return
 
         conversation = "\n".join(
@@ -245,6 +330,7 @@ def process_message(
         )
 
         try:
+
             telegram_api(
                 "sendChatAction",
                 {
@@ -252,15 +338,50 @@ def process_message(
                     "action": "typing"
                 }
             )
+
         except Exception as e:
+
             print(
                 f"Typing klaida: {e}",
                 flush=True
             )
 
-        #
-        # Formuojam tekstą OpenAI
-        #
+        # ------------------------------------------
+        # NUSPRENDŽIAM, KURIĄ NUOTRAUKĄ SIŲSTI
+        # ------------------------------------------
+
+        image_file_id = None
+
+        # Jei nuotrauka yra pačioje žinutėje,
+        # visada siunčiam ją.
+        if photo_file_id:
+
+            image_file_id = photo_file_id
+
+        # Jei dabartinėje žinutėje nuotraukos nėra,
+        # bet žmogus klausia apie nuotrauką,
+        # siunčiam paskutinę grupėje įkeltą.
+        elif asks_about_photo(text):
+
+            saved_photo = last_photo.get(
+                chat_id
+            )
+
+            if saved_photo:
+
+                image_file_id = (
+                    saved_photo["file_id"]
+                )
+
+                print(
+                    "Naudojama ankstesne "
+                    "grupes nuotrauka.",
+                    flush=True
+                )
+
+        # ------------------------------------------
+        # PROMPT
+        # ------------------------------------------
 
         prompt_text = (
             "Paskutinis grupės "
@@ -271,11 +392,6 @@ def process_message(
             f"{name}: {text}"
         )
 
-        #
-        # OpenAI input.
-        # Jei yra nuotrauka, pridedam input_image.
-        #
-
         content = [
             {
                 "type": "input_text",
@@ -283,16 +399,21 @@ def process_message(
             }
         ]
 
-        if photo_file_id:
+        # ------------------------------------------
+        # PRIDEDAM NUOTRAUKĄ OPENAI
+        # ------------------------------------------
+
+        if image_file_id:
 
             print(
-                "Parsiunciama Telegram nuotrauka...",
+                "Parsiunciama Telegram "
+                "nuotrauka...",
                 flush=True
             )
 
             image_data_url = (
                 get_telegram_photo_base64(
-                    photo_file_id
+                    image_file_id
                 )
             )
 
@@ -305,15 +426,17 @@ def process_message(
             )
 
             print(
-                "Nuotrauka prideta prie OpenAI uzklausos.",
+                "Nuotrauka prideta prie "
+                "OpenAI uzklausos.",
                 flush=True
             )
 
-        #
-        # OpenAI + web search + vision
-        #
+        # ------------------------------------------
+        # OPENAI
+        # ------------------------------------------
 
         response = client.responses.create(
+
             model="gpt-5.6-luna",
 
             tools=[
@@ -334,13 +457,20 @@ def process_message(
             ],
         )
 
-        answer = response.output_text.strip()
+        answer = (
+            response
+            .output_text
+            .strip()
+        )
 
         if not answer:
+
             print(
-                "OpenAI grazino tuscia atsakyma.",
+                "OpenAI grazino "
+                "tuscia atsakyma.",
                 flush=True
             )
+
             return
 
         send_message(
@@ -363,6 +493,7 @@ def process_message(
         )
 
         try:
+
             send_message(
                 chat_id,
                 "Roba dabar susidūrė su "
@@ -381,6 +512,10 @@ def process_message(
             )
 
 
+# --------------------------------------------------
+# WEB
+# --------------------------------------------------
+
 @web.route("/")
 def home():
     return "Roba Cabo Verde veikia 🦈"
@@ -390,6 +525,10 @@ def home():
 def health():
     return "OK"
 
+
+# --------------------------------------------------
+# TELEGRAM WEBHOOK
+# --------------------------------------------------
 
 @web.route(
     "/telegram",
@@ -447,9 +586,9 @@ def telegram_webhook():
             or "Dalyvis"
         )
 
-        #
-        # Tekstas arba nuotraukos caption
-        #
+        # ------------------------------------------
+        # TEKSTAS / NUOTRAUKOS CAPTION
+        # ------------------------------------------
 
         text = (
             message.get("text")
@@ -457,11 +596,9 @@ def telegram_webhook():
             or ""
         ).strip()
 
-        #
-        # Telegram nuotrauka.
-        # Telegram pateikia kelis dydžius.
-        # Imam paskutinį - didžiausią.
-        #
+        # ------------------------------------------
+        # NUOTRAUKA
+        # ------------------------------------------
 
         photos = message.get(
             "photo",
@@ -471,17 +608,21 @@ def telegram_webhook():
         photo_file_id = None
 
         if photos:
+
+            # Telegram pateikia kelis dydžius.
+            # Imam didžiausią.
             photo_file_id = (
                 photos[-1]
                 .get("file_id")
             )
 
-        #
-        # Jei nėra nei teksto,
-        # nei nuotraukos - kol kas ignoruojam.
-        #
+        # ------------------------------------------
+        # JEIGU NĖRA NEI TEKSTO,
+        # NEI NUOTRAUKOS
+        # ------------------------------------------
 
         if not text and not photo_file_id:
+
             return "OK", 200
 
         thread = threading.Thread(
@@ -510,6 +651,10 @@ def telegram_webhook():
 
         return "OK", 200
 
+
+# --------------------------------------------------
+# WEBHOOK SETUP
+# --------------------------------------------------
 
 @web.route("/setup-webhook")
 def setup_webhook():
@@ -551,6 +696,10 @@ def setup_webhook():
             "error": str(e)
         }), 500
 
+
+# --------------------------------------------------
+# WEBHOOK INFO
+# --------------------------------------------------
 
 @web.route("/webhook-info")
 def webhook_info():
