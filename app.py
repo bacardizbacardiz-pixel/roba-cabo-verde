@@ -1390,6 +1390,264 @@ def handle_todo(chat_id, sender_name, text):
 
 
 
+
+# ============================================================
+# BENDRAS KELIONĖS BIUDŽETAS
+# ============================================================
+
+BUDGET_PROMPT = """
+Tu esi Robos bendro Cabo Verde kelionės biudžeto tvarkytojas.
+
+Nustatyk veiksmą:
+- add: įrašyti išlaidą;
+- list: parodyti išlaidas / biudžetą;
+- total: suskaičiuoti sumas;
+- delete: ištrinti išlaidą;
+- none: ne biudžeto valdymas.
+
+ADD atveju ištrauk:
+- description: trumpas išlaidos pavadinimas;
+- amount: skaičius;
+- currency: EUR, PLN, CVE arba kita aiškiai nurodyta valiuta;
+- category: viena iš transport, food, hotel, activities, shopping, other;
+- paid_by: kas mokėjo, jei aiškiai pasakyta, kitaip null.
+
+NESPĖK valiutos. Jei suma yra, bet valiutos nėra, grąžink
+action="add", bet currency=null.
+
+DELETE atveju query turi būti trumpa paieškos frazė.
+
+TOTAL/LIST atveju papildomų laukų nereikia.
+
+Grąžink TIK validų JSON.
+
+Pavyzdžiai:
+{"action":"add","description":"Taksi iš oro uosto","amount":48,"currency":"EUR","category":"transport","paid_by":null}
+{"action":"add","description":"Pietūs","amount":3200,"currency":"CVE","category":"food","paid_by":null}
+{"action":"list"}
+{"action":"total"}
+{"action":"delete","query":"taksi"}
+{"action":"none"}
+"""
+
+
+def is_possible_budget_request(text):
+
+    lower = (text or "").lower()
+
+    keywords = [
+        "biudzet", "biudžet", "islaid", "išlaid",
+        "kainavo", "sumokej", "sumokėj", "mokej", "mokėj",
+        "eur", "€", "pln", "zl", "zł", "cve",
+        "eskud", "kiek isleid", "kiek išleid"
+    ]
+
+    has_keyword = any(k in lower for k in keywords)
+
+    has_money = bool(
+        re.search(
+            r"\b\d+(?:[.,]\d+)?\s*"
+            r"(?:€|eur|pln|zl|zł|cve)\b",
+            lower
+        )
+    )
+
+    return has_keyword or has_money
+
+
+def get_budget_items(chat_id):
+
+    result = (
+        supabase
+        .table("roba_budget")
+        .select(
+            "id,description,amount,currency,category,"
+            "paid_by,created_by,expense_date,created_at"
+        )
+        .eq("chat_id", chat_id)
+        .order("created_at", desc=False)
+        .execute()
+    )
+
+    return result.data or []
+
+
+def detect_budget_action(text):
+
+    response = client.responses.create(
+        model="gpt-5.6-luna",
+        instructions=BUDGET_PROMPT,
+        input=text
+    )
+
+    raw = response.output_text.strip()
+
+    if raw.startswith("```"):
+        raw = raw.replace("```json", "", 1)
+        raw = raw.replace("```", "").strip()
+
+    return json.loads(raw)
+
+
+def normalize_budget_text(text):
+
+    text = normalize_todo_word(text or "")
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return " ".join(text.split())
+
+
+def find_budget_match(items, query):
+
+    q = normalize_budget_text(query)
+
+    if not q:
+        return None
+
+    words = [w for w in q.split() if len(w) >= 3]
+    best = None
+    best_score = 0
+
+    for item in items:
+        desc = normalize_budget_text(
+            item.get("description") or ""
+        )
+
+        score = 100 if q in desc or desc in q else 0
+
+        for word in words:
+            if word in desc:
+                score += 10
+
+        if score > best_score:
+            best_score = score
+            best = item
+
+    return best if best_score > 0 else None
+
+
+def format_budget(items):
+
+    if not items:
+        return "Kelionės biudžetas kol kas tuščias 💰"
+
+    lines = ["Cabo Verde išlaidos 💰"]
+
+    totals = {}
+
+    for i, item in enumerate(items, start=1):
+        amount = float(item.get("amount") or 0)
+        currency = (item.get("currency") or "").upper()
+        description = item.get("description") or "Išlaida"
+
+        totals[currency] = totals.get(currency, 0) + amount
+
+        lines.append(
+            f"{i}. {description} — {amount:g} {currency}"
+        )
+
+    lines.append("")
+    lines.append("Iš viso pagal valiutas:")
+
+    for currency, amount in totals.items():
+        lines.append(f"• {amount:g} {currency}")
+
+    return "\n".join(lines)
+
+
+def handle_budget(chat_id, sender_name, text):
+
+    try:
+        decision = detect_budget_action(text)
+        action = decision.get("action", "none")
+
+        if action == "none":
+            return None
+
+        items = get_budget_items(chat_id)
+
+        if action in ("list", "total"):
+            return format_budget(items)
+
+        if action == "add":
+            description = (
+                decision.get("description") or ""
+            ).strip()
+
+            amount = decision.get("amount")
+            currency = (
+                decision.get("currency") or ""
+            ).strip().upper()
+
+            category = (
+                decision.get("category") or "other"
+            ).strip()
+
+            paid_by = decision.get("paid_by")
+
+            if not description or amount is None:
+                return "Kokią išlaidą ir kokią sumą įrašyti? 🙂"
+
+            if not currency:
+                return (
+                    f"Kokia valiuta buvo {amount} už "
+                    f"„{description}“? EUR, PLN, CVE ar kita?"
+                )
+
+            supabase.table("roba_budget").insert({
+                "chat_id": chat_id,
+                "description": description,
+                "amount": amount,
+                "currency": currency,
+                "category": category,
+                "paid_by": paid_by,
+                "created_by": sender_name,
+                "expense_date": datetime.now(
+                    ZoneInfo("Europe/Vilnius")
+                ).date().isoformat()
+            }).execute()
+
+            return (
+                "Įrašiau į biudžetą 💰\n"
+                f"• {description} — {amount} {currency}"
+            )
+
+        if action == "delete":
+            match = find_budget_match(
+                items,
+                decision.get("query", "")
+            )
+
+            if not match:
+                return (
+                    "Neradau tokios išlaidos 🙂 "
+                    "Parašyk „Roba, parodyk biudžetą“."
+                )
+
+            supabase.table(
+                "roba_budget"
+            ).delete().eq(
+                "id", match["id"]
+            ).eq(
+                "chat_id", chat_id
+            ).execute()
+
+            return (
+                "Ištryniau iš biudžeto 🗑️\n"
+                f"• {match.get('description')} — "
+                f"{float(match.get('amount') or 0):g} "
+                f"{match.get('currency')}"
+            )
+
+        return None
+
+    except Exception as e:
+        print(
+            f"Biudzeto apdorojimo klaida: "
+            f"{type(e).__name__}: {e}",
+            flush=True
+        )
+        return None
+
 # ============================================================
 # PRIMINIMAI
 # ============================================================
@@ -2482,6 +2740,60 @@ def process_message(
             )
 
             return
+
+        # ----------------------------------------------------
+        # BIUDŽETO VEIKSMAS
+        # ----------------------------------------------------
+
+        if text and is_possible_budget_request(text):
+
+            print(
+                "Biudzeto vietinis filtras: "
+                "galimas biudzeto veiksmas -> kvieciamas AI.",
+                flush=True
+            )
+
+            budget_answer = handle_budget(
+                chat_id=chat_id,
+                sender_name=name,
+                text=text
+            )
+
+            if budget_answer:
+
+                send_result = send_message(
+                    chat_id,
+                    budget_answer,
+                    message_id
+                )
+
+                sent_message_id = (
+                    send_result
+                    .get("result", {})
+                    .get("message_id")
+                )
+
+                save_message_to_db(
+                    chat_id=chat_id,
+                    telegram_message_id=sent_message_id,
+                    sender_name="Roba",
+                    sender_id=BOT_ID,
+                    message_text=budget_answer,
+                    has_photo=False,
+                    photo_file_id=None
+                )
+
+                history[chat_id].append(
+                    f"Roba: {budget_answer}"
+                )
+
+                print(
+                    "Biudzeto veiksmas atliktas. "
+                    "I ilgalaike atminti nededama.",
+                    flush=True
+                )
+
+                return
 
         # ----------------------------------------------------
         # TODO SĄRAŠO VEIKSMAS
