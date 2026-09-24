@@ -8,27 +8,18 @@ from flask import Flask, request, jsonify
 from openai import OpenAI
 
 
-# ============================================================
-# NUSTATYMAI
-# ============================================================
-
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 
 WEBHOOK_URL = "https://roba-cabo-verde.onrender.com/telegram"
 
 client = OpenAI(api_key=OPENAI_API_KEY)
-
 web = Flask(__name__)
 
-# Laikina paskutinių 100 žinučių atmintis.
-# Po Render restarto ji kol kas išsivalys.
+# Laikina pokalbio atmintis RAM.
+# Po Render restarto ji išsivalys.
 history = defaultdict(lambda: deque(maxlen=100))
 
-
-# ============================================================
-# ROBOS CHARAKTERIS
-# ============================================================
 
 SYSTEM_PROMPT = """
 Tu esi Roba – draugiškas AI asistentas privačioje Telegram grupėje
@@ -43,7 +34,24 @@ Atsakyk praktiškai ir ne per ilgai.
 Tau pateikiamas paskutinių grupės pokalbių kontekstas.
 Naudok jį, kad suprastum, apie ką grupės nariai kalba.
 
-Neišgalvok faktų, kurių nežinai.
+Tu turi interneto paieškos įrankį.
+Kai klausimas priklauso nuo naujausios ar besikeičiančios informacijos,
+pavyzdžiui:
+- dabartiniai orai ir prognozės,
+- skrydžių laikai ir pakeitimai,
+- viešbučių informacija,
+- kainos,
+- restoranai,
+- darbo laikas,
+- naujienos,
+- valiutų kursai,
+- kita aktuali informacija,
+
+naudok interneto paiešką pats.
+Žmogui nereikia pateikti nuorodos.
+
+Jeigu informaciją tikrinai internete, atsakyme aiškiai remkis tuo,
+ką radai, ir neišgalvok trūkstamų faktų.
 
 Tu matai visas naujas grupės tekstines žinutes, tačiau neturi
 atsakyti į kiekvieną jų.
@@ -55,10 +63,6 @@ Kai atsakai, elkis kaip normalus grupės dalyvis, o ne kaip
 formalus klientų aptarnavimo botas.
 """
 
-
-# ============================================================
-# TELEGRAM API
-# ============================================================
 
 def telegram_api(method, payload=None):
     if payload is None:
@@ -74,9 +78,7 @@ def telegram_api(method, payload=None):
     req = urllib.request.Request(
         url,
         data=data,
-        headers={
-            "Content-Type": "application/json"
-        },
+        headers={"Content-Type": "application/json"},
         method="POST"
     )
 
@@ -84,7 +86,6 @@ def telegram_api(method, payload=None):
         req,
         timeout=30
     ) as response:
-
         result = json.loads(
             response.read().decode("utf-8")
         )
@@ -97,12 +98,11 @@ def telegram_api(method, payload=None):
     return result
 
 
-# ============================================================
-# ŽINUTĖS SIUNTIMAS
-# ============================================================
-
-def send_message(chat_id, text, reply_to_message_id=None):
-
+def send_message(
+    chat_id,
+    text,
+    reply_to_message_id=None
+):
     payload = {
         "chat_id": chat_id,
         "text": text
@@ -119,10 +119,6 @@ def send_message(chat_id, text, reply_to_message_id=None):
     )
 
 
-# ============================================================
-# ROBOS ATSAKYMO GENERAVIMAS
-# ============================================================
-
 def process_message(
     chat_id,
     message_id,
@@ -131,26 +127,29 @@ def process_message(
 ):
     try:
         print(
-            f"Gauta Telegram zinute: {name}: {text}",
+            f"Gauta Telegram zinute: "
+            f"{name}: {text}",
             flush=True
         )
 
-        # Įsimename VISAS grupės tekstines žinutes.
+        # Įsimenam visas grupės tekstines žinutes
         history[chat_id].append(
             f"{name}: {text}"
         )
 
         lower_text = text.lower()
 
-        # Roba atsako tik tada, kai į jį kreipiamasi.
         called_roba = (
             "roba" in lower_text
             or "@robacaboverde_bot" in lower_text
         )
 
+        # Jei Roba nepaminėtas,
+        # žinutę tik išsaugom kontekstui.
         if not called_roba:
             print(
-                "Roba nepaminetas - zinute tik isiminta.",
+                "Roba nepaminetas - "
+                "zinute tik isiminta.",
                 flush=True
             )
             return
@@ -164,7 +163,6 @@ def process_message(
             flush=True
         )
 
-        # Parodome Telegram "typing..."
         try:
             telegram_api(
                 "sendChatAction",
@@ -179,13 +177,26 @@ def process_message(
                 flush=True
             )
 
+        # OpenAI atsakymas + interneto paieška
         response = client.responses.create(
             model="gpt-5.6-luna",
+
+            tools=[
+                {
+                    "type": "web_search"
+                }
+            ],
+
+            tool_choice="auto",
+
             instructions=SYSTEM_PROMPT,
+
             input=(
-                "Paskutinis grupės pokalbio kontekstas:\n\n"
+                "Paskutinis grupės "
+                "pokalbio kontekstas:\n\n"
                 f"{conversation}\n\n"
-                "Dabar atsakyk į naujausią žinutę:\n"
+                "Dabar atsakyk į "
+                "naujausią žinutę:\n"
                 f"{name}: {text}"
             ),
         )
@@ -194,7 +205,8 @@ def process_message(
 
         if not answer:
             print(
-                "OpenAI grazino tuscia atsakyma.",
+                "OpenAI grazino tuscia "
+                "atsakyma.",
                 flush=True
             )
             return
@@ -211,32 +223,28 @@ def process_message(
         )
 
     except Exception as e:
-
         print(
-            f"ROBOS KLAIDA: {type(e).__name__}: {e}",
+            f"ROBOS KLAIDA: "
+            f"{type(e).__name__}: {e}",
             flush=True
         )
 
         try:
             send_message(
                 chat_id,
-                "Roba dabar susidūrė su technine klaida 😅 "
+                "Roba dabar susidūrė su "
+                "technine klaida 😅 "
                 "Pabandyk dar kartą.",
                 message_id
             )
-
         except Exception as send_error:
-
             print(
-                f"Nepavyko issiusti klaidos zinutes: "
+                "Nepavyko issiusti "
+                "klaidos zinutes: "
                 f"{send_error}",
                 flush=True
             )
 
-
-# ============================================================
-# PAGRINDINIS PUSLAPIS
-# ============================================================
 
 @web.route("/")
 def home():
@@ -248,13 +256,11 @@ def health():
     return "OK"
 
 
-# ============================================================
-# TELEGRAM WEBHOOK
-# ============================================================
-
-@web.route("/telegram", methods=["POST"])
+@web.route(
+    "/telegram",
+    methods=["POST"]
+)
 def telegram_webhook():
-
     try:
         data = request.get_json(
             force=True,
@@ -262,12 +268,12 @@ def telegram_webhook():
         )
 
         print(
-            f"Telegram webhook gautas. "
-            f"Update ID: {data.get('update_id')}",
+            "Telegram webhook gautas. "
+            f"Update ID: "
+            f"{data.get('update_id')}",
             flush=True
         )
 
-        # Mus domina paprastos ir redaguotos žinutės.
         message = (
             data.get("message")
             or data.get("edited_message")
@@ -281,15 +287,23 @@ def telegram_webhook():
         if not text:
             return "OK", 200
 
-        user = message.get("from", {})
+        user = message.get(
+            "from",
+            {}
+        )
 
         if user.get("is_bot"):
             return "OK", 200
 
-        chat = message.get("chat", {})
+        chat = message.get(
+            "chat",
+            {}
+        )
 
         chat_id = chat.get("id")
-        message_id = message.get("message_id")
+        message_id = message.get(
+            "message_id"
+        )
 
         if not chat_id:
             return "OK", 200
@@ -300,9 +314,6 @@ def telegram_webhook():
             or "Dalyvis"
         )
 
-        # SVARBIAUSIA:
-        # Telegram iš karto gauna 200 OK.
-        # OpenAI dirba atskirame threade.
         thread = threading.Thread(
             target=process_message,
             args=(
@@ -319,24 +330,17 @@ def telegram_webhook():
         return "OK", 200
 
     except Exception as e:
-
         print(
-            f"WEBHOOK KLAIDA: {type(e).__name__}: {e}",
+            f"WEBHOOK KLAIDA: "
+            f"{type(e).__name__}: {e}",
             flush=True
         )
 
-        # Telegram vis tiek duodame 200,
-        # kad jis nekartotų tos pačios žinutės.
         return "OK", 200
 
 
-# ============================================================
-# WEBHOOK NUSTATYMAS
-# ============================================================
-
 @web.route("/setup-webhook")
 def setup_webhook():
-
     try:
         result = telegram_api(
             "setWebhook",
@@ -351,7 +355,8 @@ def setup_webhook():
         )
 
         print(
-            f"Webhook nustatytas: {result}",
+            f"Webhook nustatytas: "
+            f"{result}",
             flush=True
         )
 
@@ -361,7 +366,6 @@ def setup_webhook():
         })
 
     except Exception as e:
-
         print(
             f"Webhook setup klaida: {e}",
             flush=True
@@ -373,13 +377,8 @@ def setup_webhook():
         }), 500
 
 
-# ============================================================
-# WEBHOOK STATUSAS
-# ============================================================
-
 @web.route("/webhook-info")
 def webhook_info():
-
     try:
         result = telegram_api(
             "getWebhookInfo"
@@ -388,7 +387,6 @@ def webhook_info():
         return jsonify(result)
 
     except Exception as e:
-
         return jsonify({
             "status": "ERROR",
             "error": str(e)
