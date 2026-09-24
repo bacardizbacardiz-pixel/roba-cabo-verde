@@ -3451,6 +3451,88 @@ def health():
     return "OK"
 
 
+@web.route("/test-proactive")
+def test_proactive():
+
+    try:
+        get_bot_identity()
+
+        now_local = datetime.now(ZoneInfo("Europe/Vilnius"))
+        now_utc = datetime.now(ZoneInfo("UTC"))
+        chat_ids = get_proactive_chat_ids()
+
+        if not chat_ids:
+            return jsonify({
+                "status": "ERROR",
+                "error": "Nerastas Telegram chat_id"
+            }), 404
+
+        sent = 0
+
+        for chat_id in chat_ids:
+            todo = get_open_todo_for_proactive(chat_id)
+            reminders = get_pending_reminders_for_proactive(chat_id)
+            days = (PROACTIVE_TRIP_DATE - now_local.date()).days
+
+            lines = [
+                "🧪 **Proaktyvaus Robos testas**",
+                "",
+                f"🦈 Iki Cabo Verde kelionės liko **{days} d.**"
+            ]
+
+            if todo:
+                lines += ["", f"📋 TODO dar liko: **{len(todo)}**"]
+                for task in todo[:5]:
+                    lines.append(f"• {task}")
+
+            if reminders:
+                lines += ["", "⏰ Artimiausi suplanuoti priminimai:"]
+                for row in reminders[:3]:
+                    when = _parse_iso_datetime(row.get("remind_at"))
+                    if when:
+                        when = when.astimezone(ZoneInfo("Europe/Vilnius"))
+                        when_text = when.strftime("%Y-%m-%d %H:%M")
+                    else:
+                        when_text = "laikas nenurodytas"
+                    lines.append(f"• {when_text} — {row.get('reminder_text')}")
+
+            message = "\n".join(lines)
+            send_result = send_message(chat_id, message)
+            sent_message_id = send_result.get("result", {}).get("message_id")
+
+            save_message_to_db(
+                chat_id=chat_id,
+                telegram_message_id=sent_message_id,
+                sender_name="Roba",
+                sender_id=BOT_ID,
+                message_text=message,
+                has_photo=False,
+                photo_file_id=None
+            )
+            history[chat_id].append(f"Roba: {message}")
+            save_proactive_state(
+                chat_id,
+                last_message_at=now_utc.isoformat(),
+                last_message_type="manual_test"
+            )
+            sent += 1
+
+        return jsonify({
+            "status": "OK",
+            "test_proactive_sent": sent
+        })
+
+    except Exception as e:
+        print(
+            f"Proaktyvaus testo klaida: {type(e).__name__}: {e}",
+            flush=True
+        )
+        return jsonify({
+            "status": "ERROR",
+            "error": str(e)
+        }), 500
+
+
 @web.route("/check-reminders")
 def check_reminders():
 
