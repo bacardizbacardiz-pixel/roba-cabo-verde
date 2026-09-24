@@ -1233,6 +1233,145 @@ def handle_todo(chat_id, sender_name, text):
         )
         return None
 
+
+# ============================================================
+# ILGALAIKĖS ATMINTIES PAMIRŠIMAS
+# ============================================================
+
+FORGET_PROMPT = """
+Tu esi Robos ilgalaikės atminties tvarkytojas.
+
+Žmogus aiškiai paprašė kažką PAMIRŠTI / IŠTRINTI iš Robos
+ilgalaikės atminties.
+
+Tau pateikiamas dabartinių atminties įrašų sąrašas su jų
+memory_key ir tekstu.
+
+Nustatyk, kurį VIENĄ atminties įrašą žmogus turi omeny.
+
+Grąžink TIK validų JSON.
+
+Jeigu radai aiškų atitikmenį:
+{"memory_key":"tikslus_memory_key"}
+
+Jeigu neaišku arba tinkamo įrašo nėra:
+{"memory_key":null}
+"""
+
+
+def get_long_term_memory_rows(chat_id):
+
+    try:
+        result = (
+            supabase
+            .table("roba_memory")
+            .select("id,memory_key,memory,category")
+            .eq("chat_id", chat_id)
+            .order("created_at", desc=False)
+            .limit(200)
+            .execute()
+        )
+
+        return result.data or []
+
+    except Exception as e:
+        print(
+            f"Atminties irasu skaitymo klaida: {e}",
+            flush=True
+        )
+        return []
+
+
+def is_forget_request(text):
+
+    lower = (text or "").lower()
+
+    forget_words = [
+        "pamiršk",
+        "pamirsk",
+        "užmiršk",
+        "uzmirsk",
+        "ištrink iš atminties",
+        "istrink is atminties",
+        "pašalink iš atminties",
+        "pasalink is atminties"
+    ]
+
+    return any(word in lower for word in forget_words)
+
+
+def handle_forget_request(chat_id, text):
+
+    rows = get_long_term_memory_rows(chat_id)
+
+    if not rows:
+        return "Ilgalaikėje atmintyje nėra ką pamiršti 🙂"
+
+    memory_list = "\n".join(
+        f"- {row.get('memory_key')}: {row.get('memory')}"
+        for row in rows
+    )
+
+    prompt = (
+        "DABARTINĖ ATMINTIS:\n"
+        f"{memory_list}\n\n"
+        "ŽMOGAUS PRAŠYMAS:\n"
+        f"{text}"
+    )
+
+    response = client.responses.create(
+        model="gpt-5.6-luna",
+        instructions=FORGET_PROMPT,
+        input=prompt
+    )
+
+    raw = response.output_text.strip()
+
+    if raw.startswith("```"):
+        raw = raw.replace("```json", "", 1)
+        raw = raw.replace("```", "").strip()
+
+    decision = json.loads(raw)
+    memory_key = decision.get("memory_key")
+
+    if not memory_key:
+        return (
+            "Neradau vieno aiškaus atminties fakto, kurį reikėtų "
+            "pamiršti. Parašyk truputį tiksliau 🙂"
+        )
+
+    match = next(
+        (
+            row for row in rows
+            if row.get("memory_key") == memory_key
+        ),
+        None
+    )
+
+    if not match:
+        return (
+            "Tokio įrašo ilgalaikėje atmintyje neradau 🙂"
+        )
+
+    (
+        supabase
+        .table("roba_memory")
+        .delete()
+        .eq("chat_id", chat_id)
+        .eq("memory_key", memory_key)
+        .execute()
+    )
+
+    print(
+        f"Ilgalaike atmintis istrinta: {memory_key}",
+        flush=True
+    )
+
+    return (
+        "Pamiršau ✅\n"
+        f"{match.get('memory')}"
+    )
+
 # ============================================================
 # TELEGRAM API
 # ============================================================
@@ -1637,7 +1776,11 @@ def process_message(
         # TEKSTO ILGALAIKĖ ATMINTIS
         # ----------------------------------------------------
 
-        if text and should_analyze_for_memory(text):
+        if (
+            text
+            and should_analyze_for_memory(text)
+            and not is_forget_request(text)
+        ):
 
             print(
                 "Vietinis filtras: zinute gali buti "
@@ -1694,6 +1837,50 @@ def process_message(
 
             print(
                 "Roba nekviestas - atsakymo nebus.",
+                flush=True
+            )
+
+            return
+
+        # ----------------------------------------------------
+        # TIKRAS ILGALAIKĖS ATMINTIES PAMIRŠIMAS
+        # ----------------------------------------------------
+
+        if text and is_forget_request(text):
+
+            forget_answer = handle_forget_request(
+                chat_id=chat_id,
+                text=text
+            )
+
+            send_result = send_message(
+                chat_id,
+                forget_answer,
+                message_id
+            )
+
+            sent_message_id = (
+                send_result
+                .get("result", {})
+                .get("message_id")
+            )
+
+            save_message_to_db(
+                chat_id=chat_id,
+                telegram_message_id=sent_message_id,
+                sender_name="Roba",
+                sender_id=BOT_ID,
+                message_text=forget_answer,
+                has_photo=False,
+                photo_file_id=None
+            )
+
+            history[chat_id].append(
+                f"Roba: {forget_answer}"
+            )
+
+            print(
+                "Atminties pamirsimo veiksmas atliktas.",
                 flush=True
             )
 
