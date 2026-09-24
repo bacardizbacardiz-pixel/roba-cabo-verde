@@ -1629,6 +1629,66 @@ def format_budget(items):
     return "\n".join(lines)
 
 
+def is_budget_delete_request(text, items):
+    lower = normalize_budget_text(text or "")
+    delete_words = (
+        "pamirsk", "uzmirsk", "istrink", "pasalink",
+        "isimk", "isbrauk"
+    )
+
+    if not any(word in lower for word in delete_words):
+        return False
+
+    # Explicit memory wording belongs to long-term memory.
+    if "atmint" in lower:
+        return False
+
+    cleaned = lower
+    for word in ("roba", "biudzeto", "biudzetas", "biudzeta") + delete_words:
+        cleaned = cleaned.replace(word, " ")
+    cleaned = " ".join(cleaned.split())
+
+    if not cleaned:
+        return False
+
+    return find_budget_match(items, cleaned) is not None
+
+
+def handle_budget_delete_direct(chat_id, text, items):
+    lower = normalize_budget_text(text or "")
+
+    cleaned = lower
+    for word in (
+        "roba", "pamirsk", "uzmirsk", "istrink", "pasalink",
+        "isimk", "isbrauk", "biudzeto", "biudzetas", "biudzeta"
+    ):
+        cleaned = cleaned.replace(word, " ")
+    cleaned = " ".join(cleaned.split())
+
+    match = find_budget_match(items, cleaned)
+
+    if not match:
+        return (
+            "Neradau tokios išlaidos biudžete. "
+            "Parašyk „Roba, parodyk biudžetą“ 🙂"
+        )
+
+    (
+        supabase.table("roba_budget")
+        .delete()
+        .eq("id", match["id"])
+        .eq("chat_id", chat_id)
+        .execute()
+    )
+
+    return (
+        "Ištryniau iš biudžeto 🗑️\n"
+        f"• {match.get('description')} — "
+        f"{float(match.get('amount') or 0):g} "
+        f"{match.get('currency')}"
+    )
+
+
 def handle_budget(chat_id, sender_name, text):
 
     try:
@@ -2769,6 +2829,59 @@ def process_message(
 
                 print(
                     "TODO punktas istrintas tiesiogiai. "
+                    "Atminties pamirsimas nekvieciamas.",
+                    flush=True
+                )
+
+                return
+
+        # ----------------------------------------------------
+        # BIUDŽETO TRYNIMAS TURI PRIORITETĄ PRIEŠ ATMINTIES "PAMIRŠK"
+        # ----------------------------------------------------
+
+        if text:
+
+            budget_items = get_budget_items(chat_id)
+
+            if is_budget_delete_request(
+                text,
+                budget_items
+            ):
+
+                budget_delete_answer = handle_budget_delete_direct(
+                    chat_id=chat_id,
+                    text=text,
+                    items=budget_items
+                )
+
+                send_result = send_message(
+                    chat_id,
+                    budget_delete_answer,
+                    message_id
+                )
+
+                sent_message_id = (
+                    send_result
+                    .get("result", {})
+                    .get("message_id")
+                )
+
+                save_message_to_db(
+                    chat_id=chat_id,
+                    telegram_message_id=sent_message_id,
+                    sender_name="Roba",
+                    sender_id=BOT_ID,
+                    message_text=budget_delete_answer,
+                    has_photo=False,
+                    photo_file_id=None
+                )
+
+                history[chat_id].append(
+                    f"Roba: {budget_delete_answer}"
+                )
+
+                print(
+                    "Biudzeto irasas istrintas tiesiogiai. "
                     "Atminties pamirsimas nekvieciamas.",
                     flush=True
                 )
