@@ -1104,6 +1104,61 @@ def format_todo_list(items):
     return "\n".join(lines)
 
 
+
+def is_possible_todo_request(text, current_items=None):
+
+    normalized = normalize_todo_text(text or "")
+
+    direct_words = [
+        "todo",
+        "to do",
+        "uzduociu saras",
+        "darbu saras",
+        "itrauk",
+        "irasyk",
+        "pridek",
+        "pasalink",
+        "istrink",
+        "pazymek atlikta",
+        "padaryta",
+        "atlikta",
+        "jau padarem",
+        "jau padariau",
+        "jau nupirkom",
+        "jau nupirkau"
+    ]
+
+    if any(word in normalized for word in direct_words):
+        return True
+
+    # Jei žinutėje minimas konkretus atviras TODO punktas ir kartu yra
+    # atlikimo / šalinimo veiksmažodis, verta kviesti TODO AI.
+    action_words = [
+        "jau",
+        "padarem",
+        "padariau",
+        "nupirkom",
+        "nupirkau",
+        "atlikom",
+        "atlikau",
+        "istrink",
+        "pasalink"
+    ]
+
+    if current_items and any(word in normalized for word in action_words):
+
+        for item in current_items:
+            task = normalize_todo_text(item.get("task") or "")
+            task_words = [
+                w for w in task.split()
+                if len(w) >= 4
+            ]
+
+            if any(w in normalized for w in task_words):
+                return True
+
+    return False
+
 def detect_todo_action(text, current_items):
 
     current_list = "\n".join(
@@ -2336,11 +2391,36 @@ def process_message(
         todo_answer = None
 
         if text:
-            todo_answer = handle_todo(
-                chat_id=chat_id,
-                sender_name=name,
-                text=text
+
+            open_todo_items = get_todo_items(
+                chat_id,
+                "open"
             )
+
+            if is_possible_todo_request(
+                text,
+                open_todo_items
+            ):
+
+                print(
+                    "TODO vietinis filtras: "
+                    "galimas TODO veiksmas -> kvieciamas AI.",
+                    flush=True
+                )
+
+                todo_answer = handle_todo(
+                    chat_id=chat_id,
+                    sender_name=name,
+                    text=text
+                )
+
+            else:
+
+                print(
+                    "TODO vietinis filtras: "
+                    "AI nekvieciamas.",
+                    flush=True
+                )
 
         if todo_answer:
 
@@ -2469,29 +2549,15 @@ def process_message(
 
         else:
 
-            db_photo = get_last_photo_from_db(
-                chat_id
+            # Saugumo / kainos optimizacija:
+            # po Render restarto automatiškai NEIMAME paskutinės senos
+            # nuotraukos iš Supabase. Taip nesusiejame nesusijusios
+            # naujos žinutės su senu screenshotu ir nekuriame dublikatų.
+            print(
+                "Naujos neanalizuotos nuotraukos nera - "
+                "senas Supabase vaizdas nepridedamas.",
+                flush=True
             )
-
-            if db_photo:
-
-                image_file_id = (
-                    db_photo.get("photo_file_id")
-                )
-
-                image_source_message_id = (
-                    db_photo.get(
-                        "telegram_message_id"
-                    )
-                )
-
-                if image_file_id:
-
-                    print(
-                        "Paskutine nuotrauka "
-                        "rasta Supabase.",
-                        flush=True
-                    )
 
         # ----------------------------------------------------
         # TYPING
