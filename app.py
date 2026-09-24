@@ -5,7 +5,7 @@ import re
 import threading
 import urllib.request
 from collections import defaultdict, deque
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 
 from flask import Flask, request, jsonify
@@ -3262,6 +3262,179 @@ def send_due_reminders():
         "failed": failed
     }
 
+
+# ============================================================
+# PROAKTYVUS ROBA
+# ============================================================
+
+PROACTIVE_CHECK_HOUR = 9
+PROACTIVE_TRIP_DATE = date(2026, 11, 30)
+
+def get_proactive_chat_ids():
+    ids = set()
+    for table in ("roba_messages", "roba_memory", "roba_todo", "roba_reminders", "roba_budget"):
+        try:
+            result = supabase.table(table).select("chat_id").limit(500).execute()
+            for row in (result.data or []):
+                if row.get("chat_id") is not None:
+                    ids.add(row["chat_id"])
+        except Exception as e:
+            print(f"Proaktyvaus chat_id paieskos klaida ({table}): {e}", flush=True)
+    return list(ids)
+
+def get_proactive_state(chat_id):
+    result = (
+        supabase.table("roba_proactive")
+        .select("chat_id,last_check_at,last_message_at,last_message_type")
+        .eq("chat_id", chat_id).limit(1).execute()
+    )
+    rows = result.data or []
+    return rows[0] if rows else None
+
+def save_proactive_state(chat_id, last_check_at=None, last_message_at=None, last_message_type=None):
+    existing = get_proactive_state(chat_id)
+    payload = {"chat_id": chat_id, "updated_at": datetime.now(ZoneInfo("UTC")).isoformat()}
+    if last_check_at is not None:
+        payload["last_check_at"] = last_check_at
+    if last_message_at is not None:
+        payload["last_message_at"] = last_message_at
+    if last_message_type is not None:
+        payload["last_message_type"] = last_message_type
+    if existing:
+        supabase.table("roba_proactive").update(payload).eq("chat_id", chat_id).execute()
+    else:
+        supabase.table("roba_proactive").insert(payload).execute()
+
+def _parse_iso_datetime(value):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+def get_open_todo_for_proactive(chat_id):
+    try:
+        result = (
+            supabase.table("roba_todo")
+            .select("task").eq("chat_id", chat_id)
+            .eq("status", "open").order("created_at", desc=False)
+            .limit(10).execute()
+        )
+        return [r.get("task") for r in (result.data or []) if r.get("task")]
+    except Exception:
+        return []
+
+def get_pending_reminders_for_proactive(chat_id):
+    try:
+        result = (
+            supabase.table("roba_reminders")
+            .select("reminder_text,remind_at").eq("chat_id", chat_id)
+            .eq("status", "pending").order("remind_at", desc=False)
+            .limit(5).execute()
+        )
+        return result.data or []
+    except Exception:
+        return []
+
+def build_proactive_message(chat_id, now_local):
+    days = (PROACTIVE_TRIP_DATE - now_local.date()).days
+    todo = get_open_todo_for_proactive(chat_id)
+    reminders = get_pending_reminders_for_proactive(chat_id)
+
+    # Iki kelionės likus 60, 30, 14, 7, 3, 1 dienai – naudinga suvestinė.
+    milestones = {60, 30, 14, 7, 3, 1}
+    if days in milestones:
+        lines = [f"🦈 Iki Cabo Verde kelionės liko **{days} d.**"]
+        if todo:
+            lines.append("")
+            lines.append(f"📋 TODO dar liko: **{len(todo)}**")
+            for task in todo[:5]:
+                lines.append(f"• {task}")
+        if reminders:
+            lines.append("")
+            lines.append("⏰ Artimiausi suplanuoti priminimai:")
+            for row in reminders[:3]:
+                when = _parse_iso_datetime(row.get("remind_at"))
+                if when:
+                    when = when.astimezone(ZoneInfo("Europe/Vilnius"))
+                    when_text = when.strftime("%Y-%m-%d %H:%M")
+                else:
+                    when_text = "laikas nenurodytas"
+                lines.append(f"• {when_text} — {row.get('reminder_text')}")
+        return "\n".join(lines), "trip_countdown"
+
+    # Kelionės rytas.
+    if days == 0:
+        return (
+            "🦈✈️ **Šiandien išskrendam į Cabo Verde!**\n\n"
+            "Pagal išsaugotą rezervaciją skrydis iš WAW numatytas **05:55**. "
+            "Geros kelionės! 🌴",
+            "departure_day"
+        )
+
+    return None, None
+
+def check_proactive():
+    now_local = datetime.now(ZoneInfo("Europe/Vilnius"))
+    now_utc = datetime.now(ZoneInfo("UTC"))
+
+    # Tik ryto lange. Cron gali kviesti kas minutę, bet tikriname kartą per dieną.
+    if now_local.hour != PROACTIVE_CHECK_HOUR:
+        return {"proactive_checked": 0, "proactive_sent": 0}
+
+    checked = 0
+    sent = 0
+
+    for chat_id in get_proactive_chat_ids():
+        try:
+            state = get_proactive_state(chat_id)
+            last_check = _parse_iso_datetime((state or {}).get("last_check_at"))
+            if last_check and last_check.astimezone(ZoneInfo("Europe/Vilnius")).date() == now_local.date():
+                continue
+
+            checked += 1
+            save_proactive_state(chat_id, last_check_at=now_utc.isoformat())
+
+            message, message_type = build_proactive_message(chat_id, now_local)
+            if not message:
+                continue
+
+            # Papildoma apsauga nuo to paties tipo pakartotinio pranešimo tą pačią dieną.
+            last_message = _parse_iso_datetime((state or {}).get("last_message_at"))
+            if (
+                last_message
+                and last_message.astimezone(ZoneInfo("Europe/Vilnius")).date() == now_local.date()
+                and (state or {}).get("last_message_type") == message_type
+            ):
+                continue
+
+            send_result = send_message(chat_id, message)
+            sent_message_id = send_result.get("result", {}).get("message_id")
+
+            save_message_to_db(
+                chat_id=chat_id,
+                telegram_message_id=sent_message_id,
+                sender_name="Roba",
+                sender_id=BOT_ID,
+                message_text=message,
+                has_photo=False,
+                photo_file_id=None
+            )
+            history[chat_id].append(f"Roba: {message}")
+            save_proactive_state(
+                chat_id,
+                last_message_at=now_utc.isoformat(),
+                last_message_type=message_type
+            )
+            sent += 1
+            print(f"Proaktyvus Roba issiunte: chat={chat_id}, type={message_type}", flush=True)
+
+        except Exception as e:
+            print(f"Proaktyvaus Robos klaida chat={chat_id}: {type(e).__name__}: {e}", flush=True)
+
+    return {"proactive_checked": checked, "proactive_sent": sent}
+
 # ============================================================
 # WEB
 # ============================================================
@@ -3284,10 +3457,12 @@ def check_reminders():
     try:
         get_bot_identity()
         result = send_due_reminders()
+        proactive_result = check_proactive()
 
         return jsonify({
             "status": "OK",
-            **result
+            **result,
+            **proactive_result
         })
 
     except Exception as e:
