@@ -196,6 +196,16 @@ Pavyzdžiui:
 Neišgalvok aktualių faktų.
 
 
+
+============================================================
+TODO SĄRAŠAS
+============================================================
+
+Grupė turi bendrą kelionės TODO sąrašą Supabase.
+
+Kai programos logika pateikia TODO rezultatą, naudok tą rezultatą.
+TODO darbai nėra tas pats, kas ilgalaikės kelionės faktų atmintis.
+
 ============================================================
 ELGESYS TELEGRAM GRUPĖJE
 ============================================================
@@ -340,6 +350,51 @@ memory_key kaip tos temos ankstesniame įraše.
 Grąžink TIK validų JSON.
 """
 
+
+
+# ============================================================
+# TODO AI PROMPT
+# ============================================================
+
+TODO_PROMPT = """
+Tu esi Robos bendro Cabo Verde kelionės TODO sąrašo tvarkytojas.
+
+Iš žmogaus žinutės nustatyk, ar jis nori:
+- add: pridėti naują darbą;
+- list: parodyti dar neatliktus darbus;
+- complete: pažymėti darbą atliktu;
+- delete: ištrinti darbą;
+- none: žinutė nesusijusi su TODO sąrašo valdymu.
+
+Svarbu:
+- Įprastas klausimas apie kelionę nėra TODO komanda.
+- "reikia", "nepamiršti", "įrašyk", "pridėk" gali reikšti add.
+- "ką dar reikia padaryti", "parodyk sąrašą", "todo" gali reikšti list.
+- "jau padarėm", "nupirkom", "atlikta", "sutvarkyta" gali reikšti complete.
+- "ištrink", "pašalink" gali reikšti delete.
+- task turi būti trumpas ir aiškus, be žodžio Roba.
+- complete/delete atveju task turi apibūdinti, kurio esamo darbo ieškoti.
+
+Grąžink TIK validų JSON.
+
+{"action":"none"}
+
+arba
+
+{"action":"add","task":"Nupirkti powerbanką"}
+
+arba
+
+{"action":"list"}
+
+arba
+
+{"action":"complete","task":"powerbankas"}
+
+arba
+
+{"action":"delete","task":"powerbankas"}
+"""
 
 # ============================================================
 # NEMOKAMAS TEKSTO ATMINTIES FILTRAS
@@ -869,6 +924,236 @@ def analyze_message_for_memory(
         )
 
 
+
+# ============================================================
+# SUPABASE – TODO
+# ============================================================
+
+def get_todo_items(chat_id, status="open"):
+
+    try:
+        query = (
+            supabase
+            .table("roba_todo")
+            .select("id,task,status,created_by,created_at,completed_at")
+            .eq("chat_id", chat_id)
+        )
+
+        if status:
+            query = query.eq("status", status)
+
+        result = query.order("created_at", desc=False).execute()
+        return result.data or []
+
+    except Exception as e:
+        print(f"TODO skaitymo klaida: {e}", flush=True)
+        return []
+
+
+def add_todo_item(chat_id, task, created_by):
+
+    result = (
+        supabase
+        .table("roba_todo")
+        .insert({
+            "chat_id": chat_id,
+            "task": task,
+            "status": "open",
+            "created_by": created_by
+        })
+        .execute()
+    )
+
+    return result.data or []
+
+
+def find_best_todo_match(items, search_text):
+
+    if not items:
+        return None
+
+    search_words = set(
+        re.findall(
+            r"[a-zA-ZąčęėįšųūžĄČĘĖĮŠŲŪŽ0-9]+",
+            search_text.lower()
+        )
+    )
+
+    if not search_words:
+        return None
+
+    best_item = None
+    best_score = 0
+
+    for item in items:
+        task = (item.get("task") or "").lower()
+
+        task_words = set(
+            re.findall(
+                r"[a-zA-ZąčęėįšųūžĄČĘĖĮŠŲŪŽ0-9]+",
+                task
+            )
+        )
+
+        score = len(search_words & task_words)
+
+        if search_text.lower() in task:
+            score += 5
+
+        if score > best_score:
+            best_score = score
+            best_item = item
+
+    if best_score == 0:
+        return None
+
+    return best_item
+
+
+def format_todo_list(items):
+
+    if not items:
+        return "TODO sąrašas tuščias 😎 Viskas padaryta!"
+
+    lines = ["Mūsų Cabo Verde TODO 🦈"]
+
+    for index, item in enumerate(items, start=1):
+        lines.append(f"{index}. ⬜ {item.get('task')}")
+
+    return "\n".join(lines)
+
+
+def detect_todo_action(text, current_items):
+
+    current_list = "\n".join(
+        f"- {item.get('task')}"
+        for item in current_items
+    ) or "(sąrašas tuščias)"
+
+    prompt = (
+        "DABARTINIS NEATLIKTŲ DARBŲ SĄRAŠAS:\n"
+        f"{current_list}\n\n"
+        "NAUJA ŽINUTĖ:\n"
+        f"{text}"
+    )
+
+    response = client.responses.create(
+        model="gpt-5.6-luna",
+        instructions=TODO_PROMPT,
+        input=prompt
+    )
+
+    raw = response.output_text.strip()
+
+    if raw.startswith("```"):
+        raw = raw.replace("```json", "", 1)
+        raw = raw.replace("```", "").strip()
+
+    return json.loads(raw)
+
+
+def handle_todo(chat_id, sender_name, text):
+
+    try:
+        current_items = get_todo_items(chat_id, "open")
+        decision = detect_todo_action(text, current_items)
+
+        action = decision.get("action", "none")
+        task = (decision.get("task") or "").strip()
+
+        if action == "none":
+            return None
+
+        if action == "list":
+            return format_todo_list(current_items)
+
+        if action == "add":
+
+            if not task:
+                return "Ką tiksliai įrašyti į TODO? 🙂"
+
+            # Apsauga nuo akivaizdaus dublikato.
+            for item in current_items:
+                existing = (item.get("task") or "").strip().lower()
+
+                if existing == task.lower():
+                    return f"Šitas jau yra TODO sąraše 🙂\n⬜ {item.get('task')}"
+
+            add_todo_item(
+                chat_id=chat_id,
+                task=task,
+                created_by=sender_name
+            )
+
+            updated = get_todo_items(chat_id, "open")
+
+            return (
+                f"Įrašiau į TODO ✅\n"
+                f"⬜ {task}\n\n"
+                f"Dabar sąraše: {len(updated)}"
+            )
+
+        if action in ("complete", "delete"):
+
+            if not task:
+                return "Kurį TODO punktą turi omeny? 🙂"
+
+            match = find_best_todo_match(
+                current_items,
+                task
+            )
+
+            if not match:
+                return (
+                    "Neradau tokio punkto dabartiniame TODO sąraše. "
+                    "Parašyk „Roba, parodyk TODO“ ir pasirinksim tiksliau 🙂"
+                )
+
+            item_id = match["id"]
+            item_task = match.get("task")
+
+            if action == "complete":
+
+                (
+                    supabase
+                    .table("roba_todo")
+                    .update({
+                        "status": "done",
+                        "completed_at": "now()"
+                    })
+                    .eq("id", item_id)
+                    .eq("chat_id", chat_id)
+                    .execute()
+                )
+
+                remaining = get_todo_items(chat_id, "open")
+
+                return (
+                    f"Pažymėjau atlikta ✅\n"
+                    f"~~{item_task}~~\n\n"
+                    f"Liko darbų: {len(remaining)}"
+                )
+
+            (
+                supabase
+                .table("roba_todo")
+                .delete()
+                .eq("id", item_id)
+                .eq("chat_id", chat_id)
+                .execute()
+            )
+
+            return f"Ištryniau iš TODO 🗑️\n{item_task}"
+
+        return None
+
+    except Exception as e:
+        print(
+            f"TODO apdorojimo klaida: {type(e).__name__}: {e}",
+            flush=True
+        )
+        return None
+
 # ============================================================
 # TELEGRAM API
 # ============================================================
@@ -1330,6 +1615,54 @@ def process_message(
 
             print(
                 "Roba nekviestas - atsakymo nebus.",
+                flush=True
+            )
+
+            return
+
+        # ----------------------------------------------------
+        # TODO SĄRAŠO VEIKSMAS
+        # ----------------------------------------------------
+
+        todo_answer = None
+
+        if text:
+            todo_answer = handle_todo(
+                chat_id=chat_id,
+                sender_name=name,
+                text=text
+            )
+
+        if todo_answer:
+
+            send_result = send_message(
+                chat_id,
+                todo_answer,
+                message_id
+            )
+
+            sent_message_id = (
+                send_result
+                .get("result", {})
+                .get("message_id")
+            )
+
+            save_message_to_db(
+                chat_id=chat_id,
+                telegram_message_id=sent_message_id,
+                sender_name="Roba",
+                sender_id=BOT_ID,
+                message_text=todo_answer,
+                has_photo=False,
+                photo_file_id=None
+            )
+
+            history[chat_id].append(
+                f"Roba: {todo_answer}"
+            )
+
+            print(
+                "TODO veiksmas atliktas.",
                 flush=True
             )
 
