@@ -1776,38 +1776,13 @@ def process_message(
         # TEKSTO ILGALAIKĖ ATMINTIS
         # ----------------------------------------------------
 
-        if (
+        # Teksto ilgalaikės atminties analizę paleidžiame vėliau,
+        # tik tada, kai paaiškėja, kad žinutė nėra TODO komanda.
+        memory_analysis_needed = (
             text
             and should_analyze_for_memory(text)
             and not is_forget_request(text)
-        ):
-
-            print(
-                "Vietinis filtras: zinute gali buti "
-                "svarbi -> kvieciamas atminties AI.",
-                flush=True
-            )
-
-            memory_thread = threading.Thread(
-                target=analyze_message_for_memory,
-                args=(
-                    chat_id,
-                    name,
-                    text,
-                    message_id
-                ),
-                daemon=True
-            )
-
-            memory_thread.start()
-
-        elif text:
-
-            print(
-                "Vietinis filtras: ilgalaikes "
-                "teksto atminties AI nekvieciamas.",
-                flush=True
-            )
+        )
 
         # ----------------------------------------------------
         # AR ROBĄ KVIEČIA?
@@ -1928,11 +1903,45 @@ def process_message(
             )
 
             print(
-                "TODO veiksmas atliktas.",
+                "TODO veiksmas atliktas. "
+                "I ilgalaike atminti nededama.",
                 flush=True
             )
 
             return
+
+        # ----------------------------------------------------
+        # TEKSTO ILGALAIKĖ ATMINTIS
+        # ----------------------------------------------------
+
+        if memory_analysis_needed:
+
+            print(
+                "Vietinis filtras: zinute gali buti "
+                "svarbi -> kvieciamas atminties AI.",
+                flush=True
+            )
+
+            memory_thread = threading.Thread(
+                target=analyze_message_for_memory,
+                args=(
+                    chat_id,
+                    name,
+                    text,
+                    message_id
+                ),
+                daemon=True
+            )
+
+            memory_thread.start()
+
+        elif text:
+
+            print(
+                "Vietinis filtras: ilgalaikes "
+                "teksto atminties AI nekvieciamas.",
+                flush=True
+            )
 
         # ----------------------------------------------------
         # POKALBIO ISTORIJA
