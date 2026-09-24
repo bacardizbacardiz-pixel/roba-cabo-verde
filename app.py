@@ -41,14 +41,10 @@ web = Flask(__name__)
 # LAIKINA RAM ATMINTIS
 # ============================================================
 
-# RAM istoriją paliekame dėl greičio.
-# Tačiau pagrindinė žinučių istorija dabar bus ir Supabase.
 history = defaultdict(lambda: deque(maxlen=100))
 
-# Paskutinė nuotrauka.
 last_photo = {}
 
-# Ar nuotrauka jau buvo perduota Robai.
 photo_used = defaultdict(lambda: True)
 
 BOT_ID = None
@@ -294,6 +290,75 @@ Elkis kaip normalus draugiškas grupės dalyvis.
 
 
 # ============================================================
+# ATMINTIES ANALIZATORIAUS INSTRUKCIJA
+# ============================================================
+
+MEMORY_PROMPT = """
+Tu esi Robos ilgalaikės atminties tvarkytojas.
+
+Gauni vieną naują Telegram grupės žinutę.
+
+Tavo užduotis nuspręsti, ar joje yra faktas, sprendimas,
+rezervacija, pakeistas planas, svarbi preferencija ar kita
+informacija, kurią verta prisiminti po kelių savaičių ar mėnesių.
+
+NESaugok:
+- pasisveikinimų;
+- juokelių;
+- emoji;
+- trumpų reakcijų;
+- klausimų, kuriuose nėra naujo fakto;
+- atsitiktinių komentarų;
+- laikino pokalbio;
+- nepatvirtintų spėjimų, nebent aiškiai pažymėta, kad tai tik planas.
+
+SAUGOK, pavyzdžiui:
+- kažkas užsakyta ar nupirkta;
+- pasirinktas viešbutis;
+- pakeistas kambario tipas;
+- nuspręsta važiuoti taksi;
+- nustatyta konkreti išvykimo data;
+- rezervuotas restoranas;
+- konkretus kelionės planas;
+- svarbi grupės preferencija;
+- ankstesnio plano atšaukimas ar pakeitimas.
+
+Jeigu žinutė keičia ankstesnį sprendimą, memory_key turi būti
+toks pats kaip ankstesnio tos temos fakto, kad seną faktą būtų
+galima pakeisti.
+
+Grąžink TIK validų JSON.
+
+Jeigu saugoti nereikia:
+
+{
+  "save": false
+}
+
+Jeigu reikia saugoti:
+
+{
+  "save": true,
+  "memory_key": "trumpas_stabilus_raktas",
+  "category": "travel",
+  "memory": "Trumpas aiškus faktas lietuviškai."
+}
+
+memory_key:
+- tik mažosios lotyniškos raidės, skaičiai ir underscore;
+- turi apibūdinti temą, o ne konkrečią reikšmę.
+
+Pavyzdžiui:
+hotel_warsaw
+airport_transfer
+room_type
+flight_date
+hotel_sal
+luggage
+"""
+
+
+# ============================================================
 # SUPABASE – ŽINUČIŲ SAUGOJIMAS
 # ============================================================
 
@@ -408,14 +473,14 @@ def get_long_term_memory(chat_id):
             supabase
             .table("roba_memory")
             .select(
-                "memory,category,created_at"
+                "memory,memory_key,category,created_at"
             )
             .eq("chat_id", chat_id)
             .order(
                 "created_at",
                 desc=False
             )
-            .limit(100)
+            .limit(200)
             .execute()
         )
 
@@ -443,6 +508,175 @@ def get_long_term_memory(chat_id):
         )
 
         return ""
+
+
+def save_long_term_memory(
+    chat_id,
+    memory_key,
+    category,
+    memory
+):
+
+    try:
+
+        existing = (
+            supabase
+            .table("roba_memory")
+            .select("id,memory")
+            .eq("chat_id", chat_id)
+            .eq("memory_key", memory_key)
+            .limit(1)
+            .execute()
+        )
+
+        rows = existing.data or []
+
+        if rows:
+
+            memory_id = rows[0]["id"]
+
+            supabase.table(
+                "roba_memory"
+            ).update({
+                "memory": memory,
+                "category": category,
+                "updated_at": "now()"
+            }).eq(
+                "id",
+                memory_id
+            ).execute()
+
+            print(
+                f"Ilgalaike atmintis atnaujinta: "
+                f"{memory_key} -> {memory}",
+                flush=True
+            )
+
+        else:
+
+            supabase.table(
+                "roba_memory"
+            ).insert({
+                "chat_id": chat_id,
+                "memory_key": memory_key,
+                "category": category,
+                "memory": memory
+            }).execute()
+
+            print(
+                f"Nauja ilgalaike atmintis: "
+                f"{memory_key} -> {memory}",
+                flush=True
+            )
+
+    except Exception as e:
+
+        print(
+            f"Ilgalaikes atminties "
+            f"saugojimo klaida: {e}",
+            flush=True
+        )
+
+
+# ============================================================
+# AI – NUSPRENDŽIA, KĄ ATSIMINTI
+# ============================================================
+
+def analyze_message_for_memory(
+    chat_id,
+    sender_name,
+    message_text
+):
+
+    if not message_text:
+        return
+
+    # Labai trumpos žinutės dažniausiai nėra vertos
+    # papildomo AI kvietimo.
+    if len(message_text.strip()) < 8:
+        return
+
+    try:
+
+        current_memory = (
+            get_long_term_memory(chat_id)
+        )
+
+        prompt = (
+            "DABARTINĖ ILGALAIKĖ ATMINTIS:\n"
+            f"{current_memory or '(tuščia)'}\n\n"
+            "NAUJA ŽINUTĖ:\n"
+            f"{sender_name}: {message_text}"
+        )
+
+        response = client.responses.create(
+            model="gpt-5.6-luna",
+            instructions=MEMORY_PROMPT,
+            input=prompt
+        )
+
+        raw = (
+            response.output_text
+            .strip()
+        )
+
+        if raw.startswith("```"):
+
+            raw = raw.replace(
+                "```json",
+                "",
+                1
+            )
+
+            raw = raw.replace(
+                "```",
+                ""
+            ).strip()
+
+        decision = json.loads(raw)
+
+        if not decision.get("save"):
+            print(
+                "Zinute neverta ilgalaikes atminties.",
+                flush=True
+            )
+            return
+
+        memory_key = (
+            decision
+            .get("memory_key", "")
+            .strip()
+        )
+
+        memory = (
+            decision
+            .get("memory", "")
+            .strip()
+        )
+
+        category = (
+            decision
+            .get("category", "general")
+            .strip()
+        )
+
+        if not memory_key or not memory:
+            return
+
+        save_long_term_memory(
+            chat_id=chat_id,
+            memory_key=memory_key,
+            category=category,
+            memory=memory
+        )
+
+    except Exception as e:
+
+        print(
+            f"Atminties analizes klaida: "
+            f"{type(e).__name__}: {e}",
+            flush=True
+        )
 
 
 # ============================================================
@@ -727,7 +961,7 @@ def process_message(
             )
 
         # ----------------------------------------------------
-        # ŽMOGAUS ŽINUTĘ SAUGOME SUPABASE
+        # ŽMOGAUS ŽINUTĖ → SUPABASE
         # ----------------------------------------------------
 
         save_message_to_db(
@@ -739,7 +973,6 @@ def process_message(
             has_photo=bool(photo_file_id)
         )
 
-        # RAM kopija
         history_text = text
 
         if photo_file_id:
@@ -754,6 +987,34 @@ def process_message(
             history[chat_id].append(
                 f"{name}: {history_text}"
             )
+
+        # ----------------------------------------------------
+        # AUTOMATINĖ ILGALAIKĖ ATMINTIS
+        # ----------------------------------------------------
+
+        if text:
+
+            try:
+
+                memory_thread = threading.Thread(
+                    target=analyze_message_for_memory,
+                    args=(
+                        chat_id,
+                        name,
+                        text
+                    ),
+                    daemon=True
+                )
+
+                memory_thread.start()
+
+            except Exception as e:
+
+                print(
+                    f"Nepavyko paleisti "
+                    f"atminties analizes: {e}",
+                    flush=True
+                )
 
         # ----------------------------------------------------
         # AR ROBĄ KVIEČIA?
@@ -791,7 +1052,7 @@ def process_message(
             return
 
         # ----------------------------------------------------
-        # ISTORIJA IŠ SUPABASE
+        # PASKUTINĖS ŽINUTĖS
         # ----------------------------------------------------
 
         db_messages = (
@@ -977,7 +1238,7 @@ def process_message(
             return
 
         # ----------------------------------------------------
-        # SIUNČIAME Į TELEGRAM
+        # TELEGRAM
         # ----------------------------------------------------
 
         send_result = send_message(
@@ -987,7 +1248,7 @@ def process_message(
         )
 
         # ----------------------------------------------------
-        # ROBOS ATSAKYMĄ SAUGOME SUPABASE
+        # ROBOS ATSAKYMAS → SUPABASE
         # ----------------------------------------------------
 
         sent_message_id = (
@@ -1136,19 +1397,11 @@ def telegram_webhook():
             or "Dalyvis"
         )
 
-        # ----------------------------------------------------
-        # TEKSTAS / CAPTION
-        # ----------------------------------------------------
-
         text = (
             message.get("text")
             or message.get("caption")
             or ""
         ).strip()
-
-        # ----------------------------------------------------
-        # NUOTRAUKA
-        # ----------------------------------------------------
 
         photos = message.get(
             "photo",
@@ -1163,10 +1416,6 @@ def telegram_webhook():
                 photos[-1]
                 .get("file_id")
             )
-
-        # ----------------------------------------------------
-        # REPLY
-        # ----------------------------------------------------
 
         replied_to_roba = (
             is_reply_to_roba(
@@ -1186,10 +1435,6 @@ def telegram_webhook():
         ):
 
             return "OK", 200
-
-        # ----------------------------------------------------
-        # BACKGROUND
-        # ----------------------------------------------------
 
         thread = threading.Thread(
             target=process_message,
