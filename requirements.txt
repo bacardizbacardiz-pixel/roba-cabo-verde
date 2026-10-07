@@ -3,3 +3,4 @@ openai
 flask
 gunicorn
 supabase
+imageio-ffmpeg
