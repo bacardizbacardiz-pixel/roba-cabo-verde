@@ -4,7 +4,13 @@ import base64
 import re
 import threading
 import urllib.request
+import tempfile
+import subprocess
+import shutil
+
+import imageio_ffmpeg
 from collections import defaultdict, deque
+from pathlib import Path
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 
@@ -2570,6 +2576,83 @@ def send_message(
 
 
 # ============================================================
+# VIDEO IR GARSO ANALIZE
+# ============================================================
+
+def download_telegram_file(file_id, destination_path):
+    file_info = telegram_api("getFile", {"file_id": file_id})
+    file_path = file_info.get("result", {}).get("file_path")
+    if not file_path:
+        raise RuntimeError("Telegram negrazino video file_path.")
+
+    file_url = (
+        "https://api.telegram.org/file/"
+        f"bot{TELEGRAM_TOKEN}/{file_path}"
+    )
+
+    with urllib.request.urlopen(file_url, timeout=120) as response:
+        with open(destination_path, "wb") as output:
+            shutil.copyfileobj(response, output)
+
+    return destination_path
+
+
+def prepare_video_for_ai(file_id, max_frames=8):
+    """Parsiuncia Telegram video, istraukia reprezentatyvius kadrus ir garsa.
+    Grazina (frame_data_urls, transcript). Laikini failai visada istrinami.
+    """
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+
+    with tempfile.TemporaryDirectory(prefix="roba_video_") as tmp:
+        video_path = os.path.join(tmp, "video.mp4")
+        audio_path = os.path.join(tmp, "audio.mp3")
+        frame_pattern = os.path.join(tmp, "frame_%02d.jpg")
+
+        download_telegram_file(file_id, video_path)
+
+        # Vienas kadras mazdaug kas 4 s, bet ne daugiau kaip max_frames.
+        frame_cmd = [
+            ffmpeg, "-y", "-i", video_path,
+            "-vf", "fps=1/4,scale='min(1280,iw)':-2",
+            "-frames:v", str(max_frames),
+            "-q:v", "3", frame_pattern
+        ]
+        subprocess.run(
+            frame_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            check=False, timeout=120
+        )
+
+        frame_urls = []
+        for frame_path in sorted(Path(tmp).glob("frame_*.jpg")):
+            encoded = base64.b64encode(frame_path.read_bytes()).decode("utf-8")
+            frame_urls.append(f"data:image/jpeg;base64,{encoded}")
+
+        # Garso takelis kalbos atpazinimui. Jei video be garso, tiesiog lieka tuscia.
+        audio_cmd = [
+            ffmpeg, "-y", "-i", video_path, "-vn",
+            "-ac", "1", "-ar", "16000", "-b:a", "48k", audio_path
+        ]
+        subprocess.run(
+            audio_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            check=False, timeout=120
+        )
+
+        transcript = ""
+        if os.path.exists(audio_path) and os.path.getsize(audio_path) > 1000:
+            try:
+                with open(audio_path, "rb") as audio_file:
+                    tr = client.audio.transcriptions.create(
+                        model="gpt-4o-mini-transcribe",
+                        file=audio_file
+                    )
+                transcript = (getattr(tr, "text", "") or "").strip()
+            except Exception as e:
+                print(f"Video garso transkripcijos klaida: {e}", flush=True)
+
+        return frame_urls, transcript
+
+
+# ============================================================
 # NUOTRAUKOS
 # ============================================================
 
@@ -2812,6 +2895,7 @@ def process_message(
     name,
     text,
     photo_file_id,
+    video_file_id,
     replied_to_roba,
     reply_context
 ):
@@ -2822,6 +2906,7 @@ def process_message(
             f"Gauta Telegram zinute: "
             f"{name}: {text} "
             f"Photo: {bool(photo_file_id)} "
+            f"Video: {bool(video_file_id)} "
             f"ReplyToRoba: {replied_to_roba}",
             flush=True
         )
@@ -2869,6 +2954,12 @@ def process_message(
             else:
                 history_text = "[pridėta nuotrauka]"
 
+        if video_file_id:
+            if history_text:
+                history_text += " [pridėtas video]"
+            else:
+                history_text = "[pridėtas video]"
+
         if history_text:
 
             history[chat_id].append(
@@ -2909,6 +3000,7 @@ def process_message(
             called_by_name
             or called_by_username
             or replied_to_roba
+            or bool(video_file_id)
         )
 
         if not should_answer:
@@ -3369,6 +3461,29 @@ def process_message(
             )
 
         # ----------------------------------------------------
+        # VIDEO: KADRAI + GARSO TRANSKRIPCIJA
+        # ----------------------------------------------------
+
+        video_frame_urls = []
+        video_transcript = ""
+
+        if video_file_id:
+            try:
+                telegram_api(
+                    "sendChatAction",
+                    {"chat_id": chat_id, "action": "typing"}
+                )
+                print("Parsiunciamas ir analizuojamas Telegram video...", flush=True)
+                video_frame_urls, video_transcript = prepare_video_for_ai(video_file_id)
+                print(
+                    f"Video paruostas: {len(video_frame_urls)} kadrai, "
+                    f"transkripcija={bool(video_transcript)}",
+                    flush=True
+                )
+            except Exception as e:
+                print(f"Video paruosimo klaida: {type(e).__name__}: {e}", flush=True)
+
+        # ----------------------------------------------------
         # TYPING
         # ----------------------------------------------------
 
@@ -3400,7 +3515,18 @@ def process_message(
             f"{conversation}\n"
             f"{reply_context}\n"
             "Atsakyk į naujausią žmogaus žinutę:\n"
-            f"{name}: {text}"
+            f"{name}: {text or '[pridėtas video]'}"
+            + (
+                "\n\nVIDEO GARSO TRANSKRIPCIJA:\n" + video_transcript
+                if video_transcript else ""
+            )
+            + (
+                "\n\nPridėti vaizdai yra to paties video kadrai chronologine tvarka. "
+                "Apjunk tai, kas matoma kadruose, su garso transkripcija. "
+                "Jei žmogus nepateikė klausimo, trumpai natūraliai pakomentuok, "
+                "kas vyksta video ir kas svarbaus girdisi."
+                if video_file_id else ""
+            )
         )
 
         content = [
@@ -3436,6 +3562,13 @@ def process_message(
                 "pagrindines OpenAI uzklausos.",
                 flush=True
             )
+
+        for frame_url in video_frame_urls:
+            content.append({
+                "type": "input_image",
+                "image_url": frame_url,
+                "detail": "auto"
+            })
 
         print(
             "Kreipiamasi i OpenAI...",
@@ -4019,6 +4152,15 @@ def telegram_webhook():
                 photos[-1].get("file_id")
             )
 
+        video = message.get("video") or {}
+        video_file_id = video.get("file_id")
+
+        # Telegram kartais video atsiuncia kaip document (pvz. MP4 kaip faila).
+        document = message.get("document") or {}
+        document_mime = (document.get("mime_type") or "").lower()
+        if not video_file_id and document_mime.startswith("video/"):
+            video_file_id = document.get("file_id")
+
         replied_to_roba = is_reply_to_roba(
             message
         )
@@ -4027,7 +4169,7 @@ def telegram_webhook():
             message
         )
 
-        if not text and not photo_file_id:
+        if not text and not photo_file_id and not video_file_id:
             return "OK", 200
 
         thread = threading.Thread(
@@ -4039,6 +4181,7 @@ def telegram_webhook():
                 name,
                 text,
                 photo_file_id,
+                video_file_id,
                 replied_to_roba,
                 reply_context
             ),
