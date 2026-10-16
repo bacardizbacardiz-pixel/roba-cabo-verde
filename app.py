@@ -5,6 +5,7 @@ import re
 import threading
 import contextvars
 import urllib.request
+import urllib.error
 import tempfile
 import subprocess
 import shutil
@@ -2544,14 +2545,19 @@ def telegram_api(method, payload=None):
         method="POST"
     )
 
-    with urllib.request.urlopen(
-        req,
-        timeout=30
-    ) as response:
-
-        result = json.loads(
-            response.read().decode("utf-8")
-        )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        # Telegram errors include a useful description in the JSON body.
+        # Never log the request URL: it contains the bot token.
+        try:
+            body = json.loads(error.read().decode("utf-8"))
+            description = str(body.get("description", "HTTP request rejected"))
+        except Exception:
+            description = "HTTP request rejected"
+        print(f"Telegram API {method}: HTTP {error.code}: {description}", flush=True)
+        raise RuntimeError(f"Telegram API {method}: HTTP {error.code}: {description}") from None
 
     if not result.get("ok"):
 
@@ -2615,10 +2621,23 @@ def send_message(
             "message_id": reply_to_message_id
         }
 
-    return telegram_api(
-        "sendMessage",
-        payload
-    )
+    try:
+        return telegram_api("sendMessage", payload)
+    except RuntimeError as error:
+        detail = str(error).lower()
+        # Retry only when Telegram rejects Markdown parsing; do not
+        # resend on unrelated failures, to avoid duplicate messages.
+        markdown_problem = (
+            "can't parse entities" in detail
+            or "cant parse entities" in detail
+            or "parse entities" in detail
+        )
+        if not markdown_problem:
+            raise
+        print("Telegram Markdown atmestas; kartoju be formatavimo.", flush=True)
+        plain_payload = dict(payload)
+        plain_payload.pop("parse_mode", None)
+        return telegram_api("sendMessage", plain_payload)
 
 
 # ============================================================
