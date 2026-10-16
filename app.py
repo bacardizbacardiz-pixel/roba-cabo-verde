@@ -3,6 +3,7 @@ import json
 import base64
 import re
 import threading
+import contextvars
 import urllib.request
 import tempfile
 import subprocess
@@ -24,6 +25,20 @@ from supabase import create_client
 # ============================================================
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
+TELEGRAM_VYRU_TOKEN = os.environ.get("TELEGRAM_VYRU_TOKEN", "")
+VYRU_CHAT_ID = -699814801
+_active_bot = contextvars.ContextVar("active_bot", default="main")
+_vyru_identity = {}
+
+def current_token():
+    return TELEGRAM_VYRU_TOKEN if _active_bot.get() == "vyru" else TELEGRAM_TOKEN
+
+def current_bot_id():
+    return _vyru_identity.get("id") if _active_bot.get() == "vyru" else BOT_ID
+
+def current_bot_username():
+    return _vyru_identity.get("username") if _active_bot.get() == "vyru" else BOT_USERNAME
+
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
@@ -302,6 +317,28 @@ Atsakyk tik kai zmogus paraso „Roba“, pamini tavo Telegram username arba dar
 Kitais atvejais tylek, nors zinutes gali buti saugomos istorijoje ir naudojamos kontekstui.
 """
 
+VYRU_SYSTEM_PROMPT = """
+Tu esi Roba 🍻, savas vyrų Telegram grupės bičiulis. Kalbėk lietuviškai,
+šiltai, trumpai, praktiškai, su lengvu humoru ir sarkazmu, kai tinka.
+Nesusiek šios grupės su Cabo Verde kelione ar šeimos grupe.
+Naudok tik šios grupės istoriją ir ilgalaikę atmintį.
+Įprastai atsakyk tik kai tave kviečia „Roba“, @RobaVyruBot arba
+atsako į tavo žinutę. Rimtiems klausimams atsakyk tiksliai.
+Neteik klaidingų pažadų apie sukurtus priminimus.
+"""
+VYRU_MEMORY_PROMPT = """
+Tu tvarkai vyrų Telegram grupės ilgalaikę atmintį.
+Saugok tik naudingus planus, susitarimus, pasirinkimus, datas ir ilgalaikius faktus.
+Nesaugok tuščių reakcijų, juokelių ar nereikalingų jautrių duomenų.
+Grąžink TIK JSON: {"save":false} arba
+{"save":true,"memory_key":"stabilus_raktas","category":"general","memory":"Faktas lietuviškai"}.
+"""
+VYRU_IMAGE_MEMORY_PROMPT = """
+Iš grupės nuotraukos išrink tik aiškiai matomus, vėliau naudingus faktus.
+Grąžink TIK JSON: {"memories":[]} arba
+{"memories":[{"memory_key":"stabilus_raktas","category":"general","memory":"Faktas lietuviškai"}]}.
+"""
+
 FAMILY_MEMORY_PROMPT = """
 Tu esi Robos ilgalaikes atminties tvarkytojas privacioje seimos Telegram grupeje „Mes ir sunys TG“.
 
@@ -325,13 +362,13 @@ Jei yra, grazink TIK validu JSON: {"memories":[{"memory_key":"stabilus_raktas","
 """
 
 def get_system_prompt(chat_id):
-    return FAMILY_SYSTEM_PROMPT if chat_id == FAMILY_CHAT_ID else SYSTEM_PROMPT
+    return VYRU_SYSTEM_PROMPT if chat_id == VYRU_CHAT_ID else (FAMILY_SYSTEM_PROMPT if chat_id == FAMILY_CHAT_ID else SYSTEM_PROMPT)
 
 def get_memory_prompt(chat_id):
-    return FAMILY_MEMORY_PROMPT if chat_id == FAMILY_CHAT_ID else MEMORY_PROMPT
+    return VYRU_MEMORY_PROMPT if chat_id == VYRU_CHAT_ID else (FAMILY_MEMORY_PROMPT if chat_id == FAMILY_CHAT_ID else MEMORY_PROMPT)
 
 def get_image_memory_prompt(chat_id):
-    return FAMILY_IMAGE_MEMORY_PROMPT if chat_id == FAMILY_CHAT_ID else IMAGE_MEMORY_PROMPT
+    return VYRU_IMAGE_MEMORY_PROMPT if chat_id == VYRU_CHAT_ID else (FAMILY_IMAGE_MEMORY_PROMPT if chat_id == FAMILY_CHAT_ID else IMAGE_MEMORY_PROMPT)
 
 
 # ============================================================
@@ -2491,7 +2528,7 @@ def telegram_api(method, payload=None):
 
     url = (
         f"https://api.telegram.org/"
-        f"bot{TELEGRAM_TOKEN}/{method}"
+        f"bot{current_token()}/{method}"
     )
 
     data = json.dumps(
@@ -2529,6 +2566,15 @@ def get_bot_identity():
 
     global BOT_ID
     global BOT_USERNAME
+
+    if _active_bot.get() == "vyru":
+        if _vyru_identity.get("id"):
+            return
+        result = telegram_api("getMe")
+        bot = result.get("result", {})
+        _vyru_identity["id"] = bot.get("id")
+        _vyru_identity["username"] = (bot.get("username") or "").lower()
+        return
 
     if BOT_ID is not None:
         return
@@ -2587,7 +2633,7 @@ def download_telegram_file(file_id, destination_path):
 
     file_url = (
         "https://api.telegram.org/file/"
-        f"bot{TELEGRAM_TOKEN}/{file_path}"
+        f"bot{current_token()}/{file_path}"
     )
 
     with urllib.request.urlopen(file_url, timeout=120) as response:
@@ -2679,7 +2725,7 @@ def get_telegram_photo_base64(file_id):
 
     file_url = (
         "https://api.telegram.org/file/"
-        f"bot{TELEGRAM_TOKEN}/{file_path}"
+        f"bot{current_token()}/{file_path}"
     )
 
     with urllib.request.urlopen(
@@ -2835,8 +2881,8 @@ def is_reply_to_roba(message):
     reply_from = reply.get("from", {})
 
     if (
-        BOT_ID
-        and reply_from.get("id") == BOT_ID
+        current_bot_id()
+        and reply_from.get("id") == current_bot_id()
     ):
         return True
 
@@ -2845,8 +2891,8 @@ def is_reply_to_roba(message):
     )
 
     if (
-        BOT_USERNAME
-        and reply_username == BOT_USERNAME
+        current_bot_username()
+        and reply_username == current_bot_username()
     ):
         return True
 
@@ -2974,7 +3020,7 @@ def process_message(
         # tik tada, kai paaiškėja, kad žinutė nėra TODO komanda.
         memory_analysis_needed = (
             text
-            and should_analyze_for_memory(text)
+            and (should_analyze_for_memory(text) or (chat_id == VYRU_CHAT_ID and len(text.strip()) >= 35))
             and not is_forget_request(text)
         )
 
@@ -2990,10 +3036,10 @@ def process_message(
 
         called_by_username = False
 
-        if BOT_USERNAME:
+        if current_bot_username():
 
             called_by_username = (
-                f"@{BOT_USERNAME}" in lower_text
+                f"@{current_bot_username()}" in lower_text
             )
 
         should_answer = (
@@ -3004,6 +3050,13 @@ def process_message(
         )
 
         if not should_answer:
+            if memory_analysis_needed:
+                ctx = contextvars.copy_context()
+                threading.Thread(
+                    target=ctx.run,
+                    args=(analyze_message_for_memory, chat_id, name, text, message_id),
+                    daemon=True
+                ).start()
 
             print(
                 "Roba nekviestas - atsakymo nebus.",
@@ -3016,7 +3069,7 @@ def process_message(
         # TODO TRYNIMAS TURI PRIORITETĄ PRIEŠ ATMINTIES "PAMIRŠK"
         # ----------------------------------------------------
 
-        if chat_id != FAMILY_CHAT_ID and text:
+        if chat_id not in (FAMILY_CHAT_ID, VYRU_CHAT_ID) and text:
 
             open_todo_items = get_todo_items(
                 chat_id,
@@ -3050,7 +3103,7 @@ def process_message(
                     chat_id=chat_id,
                     telegram_message_id=sent_message_id,
                     sender_name="Roba",
-                    sender_id=BOT_ID,
+                    sender_id=current_bot_id(),
                     message_text=todo_delete_answer,
                     has_photo=False,
                     photo_file_id=None
@@ -3072,7 +3125,7 @@ def process_message(
         # BIUDŽETO TRYNIMAS TURI PRIORITETĄ PRIEŠ ATMINTIES "PAMIRŠK"
         # ----------------------------------------------------
 
-        if chat_id != FAMILY_CHAT_ID and text:
+        if chat_id not in (FAMILY_CHAT_ID, VYRU_CHAT_ID) and text:
 
             budget_items = get_budget_items(chat_id)
 
@@ -3103,7 +3156,7 @@ def process_message(
                     chat_id=chat_id,
                     telegram_message_id=sent_message_id,
                     sender_name="Roba",
-                    sender_id=BOT_ID,
+                    sender_id=current_bot_id(),
                     message_text=budget_delete_answer,
                     has_photo=False,
                     photo_file_id=None
@@ -3148,7 +3201,7 @@ def process_message(
                 chat_id=chat_id,
                 telegram_message_id=sent_message_id,
                 sender_name="Roba",
-                sender_id=BOT_ID,
+                sender_id=current_bot_id(),
                 message_text=forget_answer,
                 has_photo=False,
                 photo_file_id=None
@@ -3213,7 +3266,7 @@ def process_message(
                 chat_id=chat_id,
                 telegram_message_id=sent_message_id,
                 sender_name="Roba",
-                sender_id=BOT_ID,
+                sender_id=current_bot_id(),
                 message_text=reminder_answer,
                 has_photo=False,
                 photo_file_id=None
@@ -3235,7 +3288,7 @@ def process_message(
         # BIUDŽETO VEIKSMAS
         # ----------------------------------------------------
 
-        if chat_id != FAMILY_CHAT_ID and text and is_possible_budget_request(text):
+        if chat_id not in (FAMILY_CHAT_ID, VYRU_CHAT_ID) and text and is_possible_budget_request(text):
 
             print(
                 "Biudzeto vietinis filtras: "
@@ -3267,7 +3320,7 @@ def process_message(
                     chat_id=chat_id,
                     telegram_message_id=sent_message_id,
                     sender_name="Roba",
-                    sender_id=BOT_ID,
+                    sender_id=current_bot_id(),
                     message_text=budget_answer,
                     has_photo=False,
                     photo_file_id=None
@@ -3291,7 +3344,7 @@ def process_message(
 
         todo_answer = None
 
-        if chat_id != FAMILY_CHAT_ID and text:
+        if chat_id not in (FAMILY_CHAT_ID, VYRU_CHAT_ID) and text:
 
             open_todo_items = get_todo_items(
                 chat_id,
@@ -3341,7 +3394,7 @@ def process_message(
                 chat_id=chat_id,
                 telegram_message_id=sent_message_id,
                 sender_name="Roba",
-                sender_id=BOT_ID,
+                sender_id=current_bot_id(),
                 message_text=todo_answer,
                 has_photo=False,
                 photo_file_id=None
@@ -3371,9 +3424,11 @@ def process_message(
                 flush=True
             )
 
+            memory_context = contextvars.copy_context()
             memory_thread = threading.Thread(
-                target=analyze_message_for_memory,
+                target=memory_context.run,
                 args=(
+                    analyze_message_for_memory,
                     chat_id,
                     name,
                     text,
@@ -3623,7 +3678,7 @@ def process_message(
             chat_id=chat_id,
             telegram_message_id=sent_message_id,
             sender_name="Roba",
-            sender_id=BOT_ID,
+            sender_id=current_bot_id(),
             message_text=answer,
             has_photo=False,
             photo_file_id=None
@@ -3646,9 +3701,11 @@ def process_message(
                 flush=True
             )
 
+            image_context = contextvars.copy_context()
             image_memory_thread = threading.Thread(
-                target=analyze_image_for_memory,
+                target=image_context.run,
                 args=(
+                    analyze_image_for_memory,
                     chat_id,
                     image_data_url,
                     image_source_message_id,
@@ -3760,7 +3817,7 @@ def send_due_reminders():
                 chat_id=chat_id,
                 telegram_message_id=sent_message_id,
                 sender_name="Roba",
-                sender_id=BOT_ID,
+                sender_id=current_bot_id(),
                 message_text=message,
                 has_photo=False,
                 photo_file_id=None
@@ -3970,7 +4027,7 @@ def check_proactive():
     # Kelionės suvestinės – 09:00.
     if now_local.hour == PROACTIVE_CHECK_HOUR:
         for chat_id in get_proactive_chat_ids():
-            if chat_id == FAMILY_CHAT_ID:
+            if chat_id in (FAMILY_CHAT_ID, VYRU_CHAT_ID):
                 continue
             try:
                 state = get_proactive_state(chat_id)
@@ -3984,7 +4041,7 @@ def check_proactive():
                     continue
                 send_result = send_message(chat_id, message)
                 sent_message_id = send_result.get("result", {}).get("message_id")
-                save_message_to_db(chat_id, sent_message_id, "Roba", BOT_ID, message, False, None)
+                save_message_to_db(chat_id, sent_message_id, "Roba", current_bot_id(), message, False, None)
                 history[chat_id].append(f"Roba: {message}")
                 save_proactive_state(chat_id, last_message_at=now_utc.isoformat(), last_message_type=message_type)
                 sent += 1
@@ -3994,7 +4051,7 @@ def check_proactive():
     # Socialinis pokalbis – kasdien 18:00.
     if now_local.hour == SOCIAL_CHECK_HOUR and now_local.weekday() in SOCIAL_WEEKDAYS:
         for chat_id in get_proactive_chat_ids():
-            if chat_id == FAMILY_CHAT_ID:
+            if chat_id in (FAMILY_CHAT_ID, VYRU_CHAT_ID):
                 continue
             try:
                 state = get_proactive_state(chat_id)
@@ -4022,7 +4079,7 @@ def check_proactive():
 
                 send_result = send_message(chat_id, message)
                 sent_message_id = send_result.get("result", {}).get("message_id")
-                save_message_to_db(chat_id, sent_message_id, "Roba", BOT_ID, message, False, None)
+                save_message_to_db(chat_id, sent_message_id, "Roba", current_bot_id(), message, False, None)
                 history[chat_id].append(f"Roba: {message}")
                 save_proactive_state(
                     chat_id,
@@ -4088,10 +4145,14 @@ def check_reminders():
     "/telegram",
     methods=["POST"]
 )
+@web.route("/telegram-vyru", methods=["POST"])
 def telegram_webhook():
 
     try:
-
+        is_vyru = request.path == "/telegram-vyru"
+        if is_vyru and not TELEGRAM_VYRU_TOKEN:
+            return "Not configured", 503
+        _active_bot.set("vyru" if is_vyru else "main")
         get_bot_identity()
 
         data = request.get_json(
@@ -4120,6 +4181,11 @@ def telegram_webhook():
 
         chat = message.get("chat", {})
         chat_id = chat.get("id")
+
+        if is_vyru and chat_id != VYRU_CHAT_ID:
+            return "OK", 200
+        if not is_vyru and chat_id == VYRU_CHAT_ID:
+            return "OK", 200
 
         message_id = message.get(
             "message_id"
@@ -4172,9 +4238,11 @@ def telegram_webhook():
         if not text and not photo_file_id and not video_file_id:
             return "OK", 200
 
+        context = contextvars.copy_context()
         thread = threading.Thread(
-            target=process_message,
+            target=context.run,
             args=(
+                process_message,
                 chat_id,
                 message_id,
                 sender_id,
@@ -4260,3 +4328,28 @@ def webhook_info():
             "status": "ERROR",
             "error": str(e)
         }), 500
+
+@web.route("/setup-webhook-vyru")
+def setup_webhook_vyru():
+    if not TELEGRAM_VYRU_TOKEN:
+        return jsonify({"status": "ERROR", "error": "Missing TELEGRAM_VYRU_TOKEN"}), 503
+    _active_bot.set("vyru")
+    try:
+        result = telegram_api("setWebhook", {
+            "url": "https://roba-cabo-verde.onrender.com/telegram-vyru",
+            "drop_pending_updates": False,
+            "allowed_updates": ["message", "edited_message"]
+        })
+        return jsonify({"status": "OK", "telegram": result})
+    except Exception as e:
+        return jsonify({"status": "ERROR", "error": str(e)}), 500
+
+@web.route("/webhook-info-vyru")
+def webhook_info_vyru():
+    if not TELEGRAM_VYRU_TOKEN:
+        return jsonify({"status": "ERROR", "error": "Missing token"}), 503
+    _active_bot.set("vyru")
+    try:
+        return jsonify(telegram_api("getWebhookInfo"))
+    except Exception as e:
+        return jsonify({"status": "ERROR", "error": str(e)}), 500
