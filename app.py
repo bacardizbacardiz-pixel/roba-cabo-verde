@@ -6,6 +6,7 @@ import threading
 import contextvars
 import urllib.request
 import urllib.error
+import urllib.parse
 import tempfile
 import subprocess
 import shutil
@@ -361,6 +362,39 @@ Is pateiktos nuotraukos ar screenshoto issaugok tik aiskiai matomus ir veliau na
 Jei ilgalaikio fakto nera, grazink TIK {"memories": []}.
 Jei yra, grazink TIK validu JSON: {"memories":[{"memory_key":"stabilus_raktas","category":"family","memory":"Trumpas aiskus faktas lietuviskai."}]}
 """
+
+# YouTube oEmbed teikia viešus metaduomenis; garso ar video jis neperduoda.
+_YOUTUBE_URL_RE = re.compile(
+    r"https?://(?:www\.|m\.)?(?:youtube\.com/(?:watch\?[^\s<>]+|shorts/[^\s<>]+|live/[^\s<>]+|embed/[^\s<>]+)|youtu\.be/[^\s<>]+)",
+    re.IGNORECASE,
+)
+
+def youtube_metadata_from_text(*parts):
+    """Gauti pirmos pateiktos YouTube nuorodos patikrintus oEmbed metaduomenis."""
+    for part in parts:
+        match = _YOUTUBE_URL_RE.search(part or "")
+        if not match:
+            continue
+        video_url = match.group(0).rstrip(".,;!?)\"'")
+        endpoint = "https://www.youtube.com/oembed?" + urllib.parse.urlencode({
+            "url": video_url, "format": "json"
+        })
+        try:
+            req = urllib.request.Request(endpoint, headers={
+                "User-Agent": "Mozilla/5.0 (compatible; RobaTelegramBot/1.0)"
+            })
+            with urllib.request.urlopen(req, timeout=6) as response:
+                if response.status != 200:
+                    continue
+                metadata = json.loads(response.read(65536).decode("utf-8"))
+            title = str(metadata.get("title") or "").strip()
+            author = str(metadata.get("author_name") or "").strip()
+            if title:
+                return {"title": title[:300], "channel": author[:150], "url": video_url}
+        except (urllib.error.URLError, TimeoutError, ValueError, OSError) as exc:
+            print(f"YouTube oEmbed metaduomenu gauti nepavyko: {type(exc).__name__}", flush=True)
+    return None
+
 
 YOUTUBE_HONESTY_POLICY = """
 YOUTUBE IR KITU NUORODU PATIKIMUMAS:
@@ -3640,6 +3674,28 @@ def process_message(
                 "kopija, is jos galima skaityti tik matomus uzrasus ir vaizda, "
                 "bet ne spresti apie garso turini.\n"
             )
+
+        # Metaduomenys gaunami is YouTube oEmbed, ne is miniatiuros ar spejimo.
+        # Reply kontekstas tikrinamas pirmas, kad atsakytume apie aktualu klipa.
+        if youtube_link_in_context:
+            youtube_meta = youtube_metadata_from_text(text, reply_context)
+            if youtube_meta:
+                prompt_text += (
+                    "\n\nPATIKRINTI YOUTUBE METADUOMENYS (oEmbed):\n"
+                    f"Vaizdo iraso pavadinimas: {youtube_meta['title']}\n"
+                    f"YouTube kanalas: {youtube_meta['channel']}\n"
+                    f"Nuoroda: {youtube_meta['url']}\n"
+                    "Tai tik vaizdo iraso pavadinimas ir kanalo vardas, NE garso analize. "
+                    "Kanalo vardas nebutinai yra dainos atlikejas. "
+                    "Jei is pavadinimo aisku, gali aptarti kurini remdamasis bendromis ziniomis "
+                    "arba patikrinta interneto paieska, bet neapsimesk ji perklauses.\n"
+                )
+            else:
+                prompt_text += (
+                    "\n\nYouTube metaduomenu patikrinti nepavyko. "
+                    "Nespeliok dainos pavadinimo ar atlikejo; "
+                    "jei reikia, naudok interneto paieska ir aiskiai nurodyk neapibreztuma.\n"
+                )
 
         content = [
             {
