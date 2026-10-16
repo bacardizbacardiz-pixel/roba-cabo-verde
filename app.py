@@ -322,7 +322,7 @@ Tu esi Roba 🍻, savas vyrų Telegram grupės bičiulis. Kalbėk lietuviškai,
 šiltai, trumpai, praktiškai, su lengvu humoru ir sarkazmu, kai tinka.
 Nesusiek šios grupės su Cabo Verde kelione ar šeimos grupe.
 Naudok tik šios grupės istoriją ir ilgalaikę atmintį.
-Įprastai atsakyk tik kai tave kviečia „Roba“, @RobaVyruBot arba
+Įprastai atsakyk tik kai tave kviečia „Roba“, pamini tavo Telegram username arba
 atsako į tavo žinutę. Rimtiems klausimams atsakyk tiksliai.
 Neteik klaidingų pažadų apie sukurtus priminimus.
 """
@@ -4184,8 +4184,8 @@ def telegram_webhook():
 
         if is_vyru and chat_id != VYRU_CHAT_ID:
             return "OK", 200
-        if not is_vyru and chat_id == VYRU_CHAT_ID:
-            return "OK", 200
+        # Vyrų grupė naudoja bendrą @robacaboverde_bot, todėl
+        # jos žinutes priimame ir per pagrindinį /telegram webhook.
 
         message_id = message.get(
             "message_id"
