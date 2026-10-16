@@ -362,8 +362,20 @@ Jei ilgalaikio fakto nera, grazink TIK {"memories": []}.
 Jei yra, grazink TIK validu JSON: {"memories":[{"memory_key":"stabilus_raktas","category":"family","memory":"Trumpas aiskus faktas lietuviskai."}]}
 """
 
+YOUTUBE_HONESTY_POLICY = """
+YOUTUBE IR KITU NUORODU PATIKIMUMAS:
+Vien tik YouTube nuoroda ar Telegram nuorodos perziuros paveikslelis nera
+vaizdo iraso perziura ir nera garso perklausa. Niekada neteigk, kad
+klauseisi muzikos, girdejai instrumentus, vokala ar matei visa klipa,
+jei tau nebuvo perduotas tikras garsas ar vaizdo iraso turinys.
+Gali naudoti patikrintus metaduomenis ir interneto paieska, bet aiskiai
+atskirk faktus is saltiniu nuo to, ka is tikruju analizavai.
+Kai truksta garso, paprasyk tiesiogiai ikelti garso ar video faila.
+"""
+
 def get_system_prompt(chat_id):
-    return VYRU_SYSTEM_PROMPT if chat_id == VYRU_CHAT_ID else (FAMILY_SYSTEM_PROMPT if chat_id == FAMILY_CHAT_ID else SYSTEM_PROMPT)
+    base = VYRU_SYSTEM_PROMPT if chat_id == VYRU_CHAT_ID else (FAMILY_SYSTEM_PROMPT if chat_id == FAMILY_CHAT_ID else SYSTEM_PROMPT)
+    return base + "\n" + YOUTUBE_HONESTY_POLICY
 
 def get_memory_prompt(chat_id):
     return VYRU_MEMORY_PROMPT if chat_id == VYRU_CHAT_ID else (FAMILY_MEMORY_PROMPT if chat_id == FAMILY_CHAT_ID else MEMORY_PROMPT)
@@ -3602,6 +3614,32 @@ def process_message(
                 if video_file_id else ""
             )
         )
+
+        # YouTube nuoroda pati savaime nera perklausytas ar perziuretas video.
+        # Taisykle taikoma visoms grupems, iskaitant Reply konteksta.
+        youtube_link_in_context = bool(re.search(
+            r"(?:https?://)?(?:www\.|m\.)?(?:youtube\.com/(?:watch\?|shorts/|live/|embed/)|youtu\.be/)",
+            (text or "") + "\n" + (reply_context or "") + "\n" + (conversation or ""),
+            flags=re.IGNORECASE
+        ))
+        if youtube_link_in_context:
+            prompt_text += (
+                "\n\nSVARBI YOUTUBE PATIKIMUMO TAISYKLE:\n"
+                "YouTube nuoroda, jos Telegram perziuros kortele ar miniatiura "
+                "NEREISKIA, kad tu matei video arba girdejai garso takeli. "
+                "Nesakyk 'paklausiau', 'maciau klipe', 'dainoje girdisi', "
+                "nevertink melodijos, ritmo, vokalo, instrumentu ar nuotaikos "
+                "kaip paties perklausymo fakto, jei negavai realaus garso ar video. "
+                "Gali atpazinti pavadinima / atlikeja is aiskiai matomu metaduomenu "
+                "arba patikrintu interneto saltiniu, nurodydamas, kuo remiesi. "
+                "Jei informacija nepatikrinta, tai aiskiai pasakyk. "
+                "Jei zmogus praso nuomones apie muzika, paaiskink, kad vien "
+                "YouTube nuorodos perklausyti negali, ir pasiulyk atsiusti "
+                "garso ar video faila tiesiogiai i Telegram. "
+                "Jei prideta nuotrauka yra YouTube perziuros korteles ekrano "
+                "kopija, is jos galima skaityti tik matomus uzrasus ir vaizda, "
+                "bet ne spresti apie garso turini.\n"
+            )
 
         content = [
             {
