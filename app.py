@@ -396,6 +396,57 @@ def youtube_metadata_from_text(*parts):
     return None
 
 
+def youtube_audio_transcript(video_url):
+    """Best-effort 40 s YouTube audio speech transcription; not music perception.
+    Fail closed: never block regular chat or claim audio was heard if unavailable.
+    """
+    if os.environ.get("YOUTUBE_AUDIO_ENABLED", "0") != "1":
+        return None, "disabled"
+    match = _YOUTUBE_URL_RE.fullmatch(video_url or "")
+    if not match:
+        return None, "invalid_url"
+    try:
+        import yt_dlp
+    except ImportError:
+        return None, "missing_dependency"
+    try:
+        with tempfile.TemporaryDirectory(prefix="roba_yt_") as tmp:
+            source = os.path.join(tmp, "source")
+            opts = {
+                "format": "bestaudio[ext=m4a]/bestaudio/best",
+                "outtmpl": source + ".%(ext)s",
+                "noplaylist": True,
+                "quiet": True,
+                "no_warnings": True,
+                "socket_timeout": 8,
+                "retries": 0,
+                "fragment_retries": 0,
+                "max_filesize": 35 * 1024 * 1024,
+                "match_filter": yt_dlp.utils.match_filter_func("duration <= 900"),
+            }
+            # yt-dlp is not guaranteed to work from cloud datacenters.
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([video_url])
+            candidates = [f for f in Path(tmp).glob("source.*") if f.is_file()]
+            if not candidates:
+                return None, "no_audio"
+            audio = os.path.join(tmp, "clip.mp3")
+            ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+            subprocess.run([ffmpeg, "-nostdin", "-y", "-i", str(candidates[0]),
+                            "-t", "40", "-vn", "-ac", "1", "-ar", "16000",
+                            "-b:a", "48k", audio], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=20, check=True)
+            if not os.path.isfile(audio) or os.path.getsize(audio) < 1000:
+                return None, "empty_audio"
+            with open(audio, "rb") as handle:
+                tr = client.audio.transcriptions.create(model="gpt-4o-mini-transcribe", file=handle)
+            transcript = (getattr(tr, "text", "") or "").strip()
+            return (transcript or None), ("transcribed" if transcript else "no_speech")
+    except Exception as exc:
+        print(f"YouTube garso gavimas nepavyko: {type(exc).__name__}", flush=True)
+        return None, "unavailable"
+
+
 YOUTUBE_HONESTY_POLICY = """
 YOUTUBE IR KITU NUORODU PATIKIMUMAS:
 Vien tik YouTube nuoroda ar Telegram nuorodos perziuros paveikslelis nera
@@ -3696,6 +3747,26 @@ def process_message(
                     "Nespeliok dainos pavadinimo ar atlikejo; "
                     "jei reikia, naudok interneto paieska ir aiskiai nurodyk neapibreztuma.\n"
                 )
+
+        # Tik tiesiogiai kreipiantis i Roba su nuoroda dabartineje
+        # zinuteje ar Reply. Istorijoje esanciu nuorodu automatiskai neparsisiunciame.
+        if youtube_link_in_context:
+            direct_match = _YOUTUBE_URL_RE.search((text or "") + "\n" + (reply_context or ""))
+            if direct_match:
+                transcript, audio_status = youtube_audio_transcript(direct_match.group(0).rstrip(".,;!?)\"'"))
+                if transcript:
+                    prompt_text += (
+                        "\n\nYOUTUBE GARSO FRAGMENTO KALBOS/DAINAVIMO TRANSKRIPCIJA "
+                        "(iki 40 s; gali buti netiksli, ypac dainuojant):\n"
+                        + transcript +
+                        "\nTai nera instrumento, ritmo, vokalo tembro ar klipo vaizdo analize. "
+                        "Neteik teiginiu, kad visa daina buvo perklausyta.\n"
+                    )
+                elif audio_status != "disabled":
+                    prompt_text += (
+                        "\n\nYouTube garso fragmento transkripcijos gauti nepavyko "
+                        f"(busena: {audio_status}). Remkis tik metaduomenimis.\n"
+                    )
 
         content = [
             {
