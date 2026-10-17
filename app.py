@@ -414,6 +414,7 @@ def youtube_audio_transcript(video_url):
             source = os.path.join(tmp, "source")
             opts = {
                 "format": "bestaudio[ext=m4a]/bestaudio/best",
+                "extractor_args": {"youtube": {"player_client": ["tv", "web_safari"]}},
                 "outtmpl": source + ".%(ext)s",
                 "noplaylist": True,
                 "quiet": True,
@@ -444,6 +445,46 @@ def youtube_audio_transcript(video_url):
             return (transcript or None), ("transcribed" if transcript else "no_speech")
     except Exception as exc:
         print(f"YouTube garso gavimas nepavyko: {type(exc).__name__}", flush=True)
+        return None, "unavailable"
+
+
+def youtube_subtitles(video_url):
+    """Fallback: read captions in the first 40 seconds, not the audio itself."""
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+    except ImportError:
+        print("YouTube subtitrai: truksta youtube-transcript-api", flush=True)
+        return None, "missing_dependency"
+    parsed = urllib.parse.urlparse(video_url)
+    if (parsed.hostname or "").lower().endswith("youtu.be"):
+        video_id = parsed.path.strip("/").split("/")[0]
+    elif parsed.path == "/watch":
+        video_id = urllib.parse.parse_qs(parsed.query).get("v", [""])[0]
+    else:
+        path = parsed.path.strip("/").split("/")
+        video_id = path[1] if len(path) > 1 and path[0] in ("shorts", "live", "embed") else ""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+        return None, "invalid_video_id"
+    try:
+        tracks = YouTubeTranscriptApi().list(video_id)
+        try:
+            track = tracks.find_transcript(["lt", "en"])
+        except Exception:
+            track = next(iter(tracks))
+        pieces = []
+        for item in track.fetch():
+            start = item["start"] if isinstance(item, dict) else item.start
+            line = item["text"] if isinstance(item, dict) else item.text
+            if start >= 40:
+                break
+            line = re.sub(r"\s+", " ", str(line)).strip()
+            if line:
+                pieces.append(line)
+        result = " ".join(pieces)[:6000]
+        print("YouTube subtitrai: " + ("gauti" if result else "tuscias fragmentas"), flush=True)
+        return result or None, "captions" if result else "empty"
+    except Exception as exc:
+        print(f"YouTube subtitru gavimas nepavyko: {type(exc).__name__}: {str(exc)[:180]}", flush=True)
         return None, "unavailable"
 
 
@@ -3762,11 +3803,22 @@ def process_message(
                         "\nTai nera instrumento, ritmo, vokalo tembro ar klipo vaizdo analize. "
                         "Neteik teiginiu, kad visa daina buvo perklausyta.\n"
                     )
-                elif audio_status != "disabled":
-                    prompt_text += (
-                        "\n\nYouTube garso fragmento transkripcijos gauti nepavyko "
-                        f"(busena: {audio_status}). Remkis tik metaduomenimis.\n"
-                    )
+                else:
+                    captions, caption_status = youtube_subtitles(direct_match.group(0).rstrip(".,;!?)\"'"))
+                    if captions:
+                        prompt_text += (
+                            "\n\nYOUTUBE SUBTITRAI (tik pirmos 40 s, NE garso perklausa):\n"
+                            + captions +
+                            "\nInformacija gauta is subtitru, ne is garso. "
+                            "Gali paaiskinti zodzius, bet neteigk girdejes muzikos, ritmo, vokalo ar instrumentu.\n"
+                        )
+                    else:
+                        prompt_text += (
+                            "\n\nYouTube garso gauti nepavyko "
+                            f"(busena: {audio_status}); subtitru taip pat negauta "
+                            f"(busena: {caption_status}). Remkis tik metaduomenimis. "
+                            "Aiskiai pasakyk, kad bandyta gauti ir garsa, ir subtitrus.\n"
+                        )
 
         content = [
             {
