@@ -5,3 +5,4 @@ gunicorn
 supabase
 imageio-ffmpeg
 yt-dlp
+youtube-transcript-api>=1.2,<2
