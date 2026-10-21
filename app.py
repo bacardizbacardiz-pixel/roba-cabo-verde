@@ -2741,41 +2741,62 @@ def get_bot_identity():
     )
 
 
-def send_message(
-    chat_id,
-    text,
-    reply_to_message_id=None
-):
+def _split_telegram_text(text, limit=3500):
+    """Split long responses at paragraph/word boundaries, preserving all text."""
+    chunks = []
+    remaining = str(text or "")
+    while remaining:
+        if len(remaining) <= limit:
+            chunks.append(remaining)
+            break
+        window = remaining[:limit]
+        cut = window.rfind("\n\n")
+        if cut >= limit // 3:
+            cut += 2
+        else:
+            cut = window.rfind("\n")
+            if cut >= limit // 3:
+                cut += 1
+            else:
+                cut = window.rfind(" ")
+                if cut < limit // 3:
+                    cut = limit
+                else:
+                    cut += 1
+        chunks.append(remaining[:cut])
+        remaining = remaining[cut:]
+    return chunks
 
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "Markdown"
-    }
 
-    if reply_to_message_id:
-
-        payload["reply_parameters"] = {
-            "message_id": reply_to_message_id
-        }
-
-    try:
-        return telegram_api("sendMessage", payload)
-    except RuntimeError as error:
-        detail = str(error).lower()
-        # Retry only when Telegram rejects Markdown parsing; do not
-        # resend on unrelated failures, to avoid duplicate messages.
-        markdown_problem = (
-            "can't parse entities" in detail
-            or "cant parse entities" in detail
-            or "parse entities" in detail
-        )
-        if not markdown_problem:
-            raise
-        print("Telegram Markdown atmestas; kartoju be formatavimo.", flush=True)
-        plain_payload = dict(payload)
-        plain_payload.pop("parse_mode", None)
-        return telegram_api("sendMessage", plain_payload)
+def send_message(chat_id, text, reply_to_message_id=None):
+    """Send a reply, splitting overlong text to avoid Telegram's 4096 limit."""
+    chunks = _split_telegram_text(text)
+    if not chunks:
+        return None
+    last_result = None
+    for index, chunk in enumerate(chunks):
+        payload = {"chat_id": chat_id, "text": chunk}
+        # Split chunks can contain unmatched Markdown delimiters. Send them
+        # as plain text; preserve Markdown formatting for short replies.
+        if len(chunks) == 1:
+            payload["parse_mode"] = "Markdown"
+        if reply_to_message_id and index == 0:
+            payload["reply_parameters"] = {"message_id": reply_to_message_id}
+        try:
+            last_result = telegram_api("sendMessage", payload)
+        except RuntimeError as error:
+            detail = str(error).lower()
+            markdown_problem = (
+                "can't parse entities" in detail
+                or "cant parse entities" in detail
+                or "parse entities" in detail
+            )
+            if not markdown_problem or "parse_mode" not in payload:
+                raise
+            print("Telegram Markdown atmestas; kartoju be formatavimo.", flush=True)
+            payload.pop("parse_mode", None)
+            last_result = telegram_api("sendMessage", payload)
+    return last_result
 
 
 # ============================================================
