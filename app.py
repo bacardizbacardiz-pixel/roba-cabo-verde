@@ -503,6 +503,36 @@ def get_system_prompt(chat_id):
     base = VYRU_SYSTEM_PROMPT if chat_id == VYRU_CHAT_ID else (FAMILY_SYSTEM_PROMPT if chat_id == FAMILY_CHAT_ID else SYSTEM_PROMPT)
     return base + "\n" + YOUTUBE_HONESTY_POLICY
 
+# Mama Roba – papildomas pokalbio režimas, be administravimo teisių.
+MAMA_ROBA_PROMPT = """
+TU ESI MAMA ROBA 🦈 – to paties Telegram boto techninė pagalbininkė.
+Šis režimas įjungiamas tik kai žmogus aiškiai kreipiasi „Mama Roba“.
+Kalbėk lietuviškai, šiltai, aiškiai ir praktiškai. Gali lengvai pajuokauti.
+Padėk diagnozuoti boto elgesį, paaiškinti galimas klaidų priežastis,
+siūlyti saugius testus ir kodo pakeitimų idėjas.
+
+RIBOS:
+- Neturi tiesioginės prieigos prie GitHub, Render logų, serverio ar kodo,
+  nebent atitinkama informacija aiškiai pateikta pokalbyje.
+- Nematai kitų Telegram grupių pokalbių; naudok tik dabartinės grupės
+  pateiktą istoriją ir atmintį. Neskelbk kitų grupių duomenų.
+- Negali pati keisti kodo, diegti pakeitimų ar taisyti klaidų serveryje.
+- Neapsimesk atlikusi diagnostiką ar pakeitimus, kurių realiai neatlikai.
+- Jei trūksta duomenų, paprašyk konkretaus klaidos teksto, logų ištraukos
+  arba veiksmų sekos. Nesugalvok neegzistuojančių faktų.
+- Niekada neprašyk API raktų, slaptažodžių ar tokenų.
+- Jei žmogus prašo pakeisti duomenis, priminimus ar TODO, paaiškink,
+  kad Mama Roba šiuo režimu tik konsultuoja; įprastas funkcijas vykdo Roba.
+Atsakyk glaustai; sudėtingoms problemoms duok vieną aiškų kitą žingsnį.
+"""
+
+_MAMA_ROBA_RE = re.compile(r"(?<!\w)mama\s+roba(?!\w)", re.IGNORECASE)
+
+
+def is_mama_roba_request(text):
+    return bool(_MAMA_ROBA_RE.search(text or ""))
+
+
 def get_memory_prompt(chat_id):
     return VYRU_MEMORY_PROMPT if chat_id == VYRU_CHAT_ID else (FAMILY_MEMORY_PROMPT if chat_id == FAMILY_CHAT_ID else MEMORY_PROMPT)
 
@@ -3256,6 +3286,7 @@ def process_message(
         # ----------------------------------------------------
 
         lower_text = text.lower()
+        mama_roba_mode = is_mama_roba_request(text)
 
         called_by_name = (
             "roba" in lower_text
@@ -3278,7 +3309,7 @@ def process_message(
         )
 
         if not should_answer:
-            if memory_analysis_needed:
+            if memory_analysis_needed and not mama_roba_mode:
                 ctx = contextvars.copy_context()
                 threading.Thread(
                     target=ctx.run,
@@ -3297,7 +3328,7 @@ def process_message(
         # TODO TRYNIMAS TURI PRIORITETĄ PRIEŠ ATMINTIES "PAMIRŠK"
         # ----------------------------------------------------
 
-        if chat_id not in (FAMILY_CHAT_ID, VYRU_CHAT_ID) and text:
+        if not mama_roba_mode and chat_id not in (FAMILY_CHAT_ID, VYRU_CHAT_ID) and text:
 
             open_todo_items = get_todo_items(
                 chat_id,
@@ -3353,7 +3384,7 @@ def process_message(
         # BIUDŽETO TRYNIMAS TURI PRIORITETĄ PRIEŠ ATMINTIES "PAMIRŠK"
         # ----------------------------------------------------
 
-        if chat_id not in (FAMILY_CHAT_ID, VYRU_CHAT_ID) and text:
+        if not mama_roba_mode and chat_id not in (FAMILY_CHAT_ID, VYRU_CHAT_ID) and text:
 
             budget_items = get_budget_items(chat_id)
 
@@ -3406,7 +3437,7 @@ def process_message(
         # TIKRAS ILGALAIKĖS ATMINTIES PAMIRŠIMAS
         # ----------------------------------------------------
 
-        if text and is_forget_request(text):
+        if not mama_roba_mode and text and is_forget_request(text):
 
             forget_answer = handle_forget_request(
                 chat_id=chat_id,
@@ -3456,7 +3487,7 @@ def process_message(
             reply_context=reply_context
         )
 
-        if text and (
+        if not mama_roba_mode and text and (
             is_reminder_request(text)
             or reminder_followup_text
         ):
@@ -3516,7 +3547,7 @@ def process_message(
         # BIUDŽETO VEIKSMAS
         # ----------------------------------------------------
 
-        if chat_id not in (FAMILY_CHAT_ID, VYRU_CHAT_ID) and text and is_possible_budget_request(text):
+        if not mama_roba_mode and chat_id not in (FAMILY_CHAT_ID, VYRU_CHAT_ID) and text and is_possible_budget_request(text):
 
             print(
                 "Biudzeto vietinis filtras: "
@@ -3572,7 +3603,7 @@ def process_message(
 
         todo_answer = None
 
-        if chat_id not in (FAMILY_CHAT_ID, VYRU_CHAT_ID) and text:
+        if not mama_roba_mode and chat_id not in (FAMILY_CHAT_ID, VYRU_CHAT_ID) and text:
 
             open_todo_items = get_todo_items(
                 chat_id,
@@ -3981,7 +4012,8 @@ def process_message(
                 }
             ],
             tool_choice="auto",
-            instructions=get_system_prompt(chat_id),
+            instructions=(get_system_prompt(chat_id) + "\n\n" + MAMA_ROBA_PROMPT
+                          if mama_roba_mode else get_system_prompt(chat_id)),
             input=[
                 {
                     "role": "user",
