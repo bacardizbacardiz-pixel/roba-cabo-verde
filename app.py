@@ -488,6 +488,137 @@ def youtube_subtitles(video_url):
         return None, "unavailable"
 
 
+def youtube_transcriptapi_fallback(video_url):
+    """External captions fallback. First check caption availability (free endpoint).
+
+    Only transcript data, never audio. Uses Render's TRANSCRIPT_API_KEY.
+    """
+    api_key = os.environ.get("TRANSCRIPT_API_KEY", "").strip()
+    if not api_key:
+        print("TranscriptAPI: TRANSCRIPT_API_KEY nenustatytas", flush=True)
+        return None, "not_configured"
+    match = _YOUTUBE_URL_RE.fullmatch(video_url or "")
+    if not match:
+        return None, "invalid_url"
+
+    base = "https://transcriptapi.com/api/v2/youtube/"
+    headers = {"Authorization": "Bearer " + api_key, "Accept": "application/json"}
+
+    def fetch_json(path, params, timeout=12):
+        url = base + path + "?" + urllib.parse.urlencode(params)
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            return json.loads(response.read(2_000_000).decode("utf-8"))
+
+    try:
+        # This check costs no credits and prevents wasting a paid transcript
+        # request on videos without available captions.
+        info = fetch_json("info", {"video_url": video_url}, timeout=10)
+        languages = info.get("available_languages") or []
+        codes = [entry.get("code", "") for entry in languages if isinstance(entry, dict)]
+        codes = [code for code in codes if code]
+        if not codes:
+            print("TranscriptAPI: siame irase subtitru nera", flush=True)
+            return None, "no_captions"
+        # Prefer original-language German, then Lithuanian/English, otherwise
+        # the first language actually listed by the provider.
+        preferred = next((code for code in ("de", "lt", "en") if code in codes), codes[0])
+        data = fetch_json("transcript", {"video_url": video_url, "language": preferred, "format": "json"}, timeout=18)
+        segments = data.get("transcript") or []
+        if not isinstance(segments, list):
+            return None, "invalid_response"
+        lines = []
+        for segment in segments:
+            if not isinstance(segment, dict):
+                continue
+            try:
+                start = float(segment.get("start", 0))
+            except (TypeError, ValueError):
+                continue
+            if start >= 40:
+                break
+            line = re.sub(r"\s+", " ", str(segment.get("text") or "")).strip()
+            if line:
+                lines.append(line)
+        result = " ".join(lines)[:6000]
+        print(f"TranscriptAPI: {'subtitrai gauti' if result else 'pirmose 40 s teksto nera'} (kalba: {data.get('language', preferred)})", flush=True)
+        return (result or None), ("external_captions" if result else "no_text_first_40s")
+    except urllib.error.HTTPError as exc:
+        # Do not log API credentials or the full request URL.
+        print(f"TranscriptAPI HTTP klaida: {exc.code}", flush=True)
+        return None, f"http_{exc.code}"
+    except Exception as exc:
+        print(f"TranscriptAPI klaida: {type(exc).__name__}", flush=True)
+        return None, "unavailable"
+
+
+def youtube_video_frames_and_speech(video_url, max_frames=6):
+    """Best-effort visual frames and speech from a YouTube file, not music listening.
+
+    Requires yt-dlp; cloud-IP restrictions may make retrieval impossible.
+    Never reports a successful viewing if no frames were extracted.
+    """
+    if os.environ.get("YOUTUBE_VIDEO_ENABLED", "1") != "1":
+        return [], "", "disabled"
+    if not _YOUTUBE_URL_RE.fullmatch(video_url or ""):
+        return [], "", "invalid_url"
+    try:
+        import yt_dlp
+    except ImportError:
+        return [], "", "missing_yt_dlp"
+    try:
+        with tempfile.TemporaryDirectory(prefix="roba_ytvideo_") as tmp:
+            destination = os.path.join(tmp, "clip.%(ext)s")
+            opts = {
+                "format": "best[ext=mp4][height<=480]/best[height<=480]/best[ext=mp4]",
+                "outtmpl": destination,
+                "noplaylist": True,
+                "quiet": True,
+                "no_warnings": True,
+                "socket_timeout": 8,
+                "retries": 0,
+                "fragment_retries": 0,
+                "max_filesize": 35 * 1024 * 1024,
+                "match_filter": yt_dlp.utils.match_filter_func("duration <= 600"),
+            }
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([video_url])
+            files = [f for f in Path(tmp).glob("clip.*") if f.is_file()]
+            if not files:
+                return [], "", "download_unavailable"
+            source = str(files[0])
+            if os.path.getsize(source) > 35 * 1024 * 1024:
+                return [], "", "too_large"
+            ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+            frame_pattern = os.path.join(tmp, "frame_%02d.jpg")
+            subprocess.run([
+                ffmpeg, "-nostdin", "-y", "-i", source,
+                "-vf", "fps=1/10,scale='min(720,iw)':-2",
+                "-frames:v", str(max_frames), "-q:v", "5", frame_pattern
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=35, check=False)
+            frames = [
+                "data:image/jpeg;base64," + base64.b64encode(f.read_bytes()).decode("ascii")
+                for f in sorted(Path(tmp).glob("frame_*.jpg"))[:max_frames]
+            ]
+            audio_path = os.path.join(tmp, "speech.mp3")
+            speech = ""
+            try:
+                subprocess.run([
+                    ffmpeg, "-nostdin", "-y", "-i", source, "-t", "60", "-vn",
+                    "-ac", "1", "-ar", "16000", "-b:a", "48k", audio_path
+                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=35, check=False)
+                if os.path.isfile(audio_path) and os.path.getsize(audio_path) > 1000:
+                    with open(audio_path, "rb") as handle:
+                        result = client.audio.transcriptions.create(model="gpt-4o-mini-transcribe", file=handle)
+                    speech = (getattr(result, "text", "") or "").strip()[:6000]
+            except Exception as exc:
+                print(f"YouTube kalbos transkripcijos klaida: {type(exc).__name__}", flush=True)
+            return frames, speech, ("frames" if frames else "no_frames")
+    except Exception as exc:
+        print(f"YouTube video gavimas nepavyko: {type(exc).__name__}", flush=True)
+        return [], "", "unavailable"
+
+
 YOUTUBE_HONESTY_POLICY = """
 YOUTUBE IR KITU NUORODU PATIKIMUMAS:
 Vien tik YouTube nuoroda ar Telegram nuorodos perziuros paveikslelis nera
@@ -497,6 +628,8 @@ jei tau nebuvo perduotas tikras garsas ar vaizdo iraso turinys.
 Gali naudoti patikrintus metaduomenis ir interneto paieska, bet aiskiai
 atskirk faktus is saltiniu nuo to, ka is tikruju analizavai.
 Kai truksta garso, paprasyk tiesiogiai ikelti garso ar video faila.
+Jei gauti tik kadrai, neapsimesk, kad girdejai muzika. Jei gauti tik
+subtitrai, neapsimesk, kad matei vaizda. Atskirai ivardyk saltinius.
 """
 
 # Bendros faktu patikimumo taisykles visoms trims Telegram grupems.
@@ -3995,36 +4128,61 @@ def process_message(
                     "jei reikia, naudok interneto paieska ir aiskiai nurodyk neapibreztuma.\n"
                 )
 
-        # Tik tiesiogiai kreipiantis i Roba su nuoroda dabartineje
-        # zinuteje ar Reply. Istorijoje esanciu nuorodu automatiskai neparsisiunciame.
+        # Analizuojame tik dabartineje zinuteje / Reply esancia YouTube nuoroda.
+        # Istorijoje esanciu nuorodu neatsisiunciame ir neapmokestiname.
         if youtube_link_in_context:
             direct_match = _YOUTUBE_URL_RE.search((text or "") + "\n" + (reply_context or ""))
             if direct_match:
-                transcript, audio_status = youtube_audio_transcript(direct_match.group(0).rstrip(".,;!?)\"'"))
-                if transcript:
+                youtube_url = direct_match.group(0).rstrip(".,;!?)\"'")
+                # 1) Tikri video kadrai + kalbos atpazinimas, jei atsisiuntimas imanomas.
+                yt_frames, yt_speech, yt_video_status = youtube_video_frames_and_speech(youtube_url)
+                if yt_frames:
+                    video_frame_urls.extend(yt_frames)
                     prompt_text += (
-                        "\n\nYOUTUBE GARSO FRAGMENTO KALBOS/DAINAVIMO TRANSKRIPCIJA "
-                        "(iki 40 s; gali buti netiksli, ypac dainuojant):\n"
-                        + transcript +
-                        "\nTai nera instrumento, ritmo, vokalo tembro ar klipo vaizdo analize. "
-                        "Neteik teiginiu, kad visa daina buvo perklausyta.\n"
+                        "\n\nYOUTUBE VIDEO: gauti " + str(len(yt_frames)) +
+                        " tikri kadrai is pirmos mazdaug minutes (kas 10 s). "
+                        "Gali analizuoti tik tai, kas juose matoma; ne visa klipa.\n"
                     )
+                if yt_speech:
+                    prompt_text += (
+                        "\n\nYOUTUBE GARSO KALBOS ATPAZINIMAS (iki 60 s):\n" + yt_speech +
+                        "\nTai kalbos / dainuojamu zodziu transkripcija, o ne muzikos klausymo analize.\n"
+                    )
+                # 2) Nepriklausomas subtitru kelias per TranscriptAPI.
+                # API raktas lieka tik Render aplinkoje, i prompta nepatenka.
+                print("YouTube: pradedama TranscriptAPI patikra", flush=True)
+                captions, captions_status = youtube_transcriptapi_fallback(youtube_url)
+                transcriptapi_status = captions_status
+                print(f"YouTube: TranscriptAPI rezultatas={transcriptapi_status}, tekstas={bool(captions)}", flush=True)
+                if not captions:
+                    print("YouTube: bandomas tiesioginis subtitru atsarginis budas", flush=True)
+                    captions, captions_status = youtube_subtitles(youtube_url)
+                    print(f"YouTube: tiesioginiu subtitru rezultatas={captions_status}, tekstas={bool(captions)}", flush=True)
                 else:
-                    captions, caption_status = youtube_subtitles(direct_match.group(0).rstrip(".,;!?)\"'"))
-                    if captions:
-                        prompt_text += (
-                            "\n\nYOUTUBE SUBTITRAI (tik pirmos 40 s, NE garso perklausa):\n"
-                            + captions +
-                            "\nInformacija gauta is subtitru, ne is garso. "
-                            "Gali paaiskinti zodzius, bet neteigk girdejes muzikos, ritmo, vokalo ar instrumentu.\n"
-                        )
-                    else:
-                        prompt_text += (
-                            "\n\nYouTube garso gauti nepavyko "
-                            f"(busena: {audio_status}); subtitru taip pat negauta "
-                            f"(busena: {caption_status}). Remkis tik metaduomenimis. "
-                            "Aiskiai pasakyk, kad bandyta gauti ir garsa, ir subtitrus.\n"
-                        )
+                    captions_status = "transcriptapi_" + captions_status
+                if captions:
+                    prompt_text += (
+                        "\n\nYOUTUBE SUBTITRAI (pirmos 40 s, ne garso perklausa):\n" + captions +
+                        "\nSubtitrai gali buti netikslus, ypac muzikos irasuose.\n"
+                    )
+                if not yt_frames and not yt_speech and not captions:
+                    prompt_text += (
+                        "\n\nYOUTUBE TURINYS NEPASIEKIAMAS: video=" + yt_video_status +
+                        ", TranscriptAPI=" + transcriptapi_status +
+                        ", subtitrai=" + captions_status +
+                        ". Gali naudoti tik metaduomenis, nesakyk, kad ziurejai ar girdejai klipa. "
+                        "Paprasyt tiesiogiai ikelti video ar garso faila.\n"
+                    )
+                elif not yt_frames:
+                    prompt_text += (
+                        "\n\nYOUTUBE VAIZDO KADRU NEGAVAI (" + yt_video_status +
+                        "). Neteik teiginiu apie klipo vaizda.\n"
+                    )
+                if not yt_speech:
+                    prompt_text += (
+                        "\n\nYOUTUBE GARSO NEPERKLAUSEI. Nevertink instrumentu, melodijos, "
+                        "vokalo ar skambesio remdamasis vien subtitrais ir kadrais.\n"
+                    )
 
         content = [
             {
