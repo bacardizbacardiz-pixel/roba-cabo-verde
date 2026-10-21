@@ -2401,20 +2401,55 @@ Jeigu trūksta datos / laiko:
 
 
 def is_reminder_request(text):
+    """Tik priminimu kurimo arba valdymo ketinimas, ne zodis 'primink'.
 
-    lower = (text or "").lower()
+    Informacijos prisiminimo klausimai turi keliauti i iprasta AI atsakyma.
+    """
+    lower = normalize_todo_word(text or "").lower()
+    lower = re.sub(r"\s+", " ", lower).strip()
+    if not lower:
+        return False
 
-    words = [
-        "primink",
-        "priminimą",
-        "priminima",
-        "priminimas",
-        "priminimai",
-        "priminimus",
-        "priminimu"
-    ]
+    # Klausimai apie jau zinomus faktus, ne naujo pranesimo planavimas.
+    # Pvz. 'primink, kokius kambarius uzsakeme' ar 'primink, ar sumokejome'.
+    recall = re.search(
+        r"\bprimink(?:ite)?\s*[,.:!?-]?\s*"
+        r"(?:man\s+)?(?:ka|kas|kok(?:i|ia|ie|ius|ias|iu|io|iame)|"
+        r"kur|kada|kiek|kuris|kuri|ar|kaip|del\s+ko|"
+        r"apie\s+(?:ka|kuri|kok))\b",
+        lower,
+    )
+    if recall:
+        return False
 
-    return any(word in lower for word in words)
+    # Aiskus saraso / atsaukimo valdymas.
+    if re.search(r"\b(?:parodyk|parodykite|isvardyk|kokie|kiek|atsauk|"
+                 r"atsaukti|istrink|panaikink)\b.*\bpriminim", lower):
+        return True
+    if re.search(r"\bpriminim\w*\b.*\b(?:parodyk|atsauk|istrink|panaikink)\b", lower):
+        return True
+
+    # Naujo priminimo veiksmas: 'primink rytoj', 'primink man paskambinti',
+    # 'nustatyk priminima' ir pan. Jei laiko nera, modulis jo paklaus.
+    if re.search(r"\b(?:primink|priminkite)\b", lower):
+        return True
+    if re.search(r"\b(?:sukurk|sukurti|nustatyk|nustatyti|idek|pridek|"
+                 r"uzdek|uzstatyk)\b.*\bpriminim", lower):
+        return True
+    if re.search(r"\b(?:noriu|reikia|galima)\b.*\bpriminim", lower):
+        return True
+    return False
+
+
+def is_reminder_followup_context(reply_context):
+    """Tikras klausimas apie priminimo laika, ne atsitiktinis 'primink'."""
+    context = normalize_todo_word(reply_context or "").lower()
+    return bool(re.search(
+        r"\b(?:kada|kokiu laiku|kuria diena|kuria valanda)\b"
+        r".{0,90}\bprimint\w*\b|"
+        r"\bprimint\w*\b.{0,90}\b(?:kada|kokiu laiku)\b",
+        context,
+    ))
 
 
 def save_reminder(
@@ -2457,16 +2492,7 @@ def get_reminder_followup_text(text, replied_to_roba, reply_context):
     if not current or not context:
         return None
 
-    context_lower = context.lower()
-
-    reminder_context_words = (
-        "kada", "priminti", "primin", "laik", "dat"
-    )
-
-    if not (
-        ("prim" in context_lower)
-        and any(word in context_lower for word in reminder_context_words)
-    ):
+    if not is_reminder_followup_context(context):
         return None
 
     # Naujas atsakymas turi atrodyti kaip laikas / data / santykinis laikas.
